@@ -602,9 +602,57 @@ def start(update, context):
 def clockin(update, context):
     try:
         user = update.effective_user
+        
+        # 请求位置信息
+        keyboard = ReplyKeyboardMarkup(
+            [[KeyboardButton("📍 Share Location", request_location=True)], 
+             [KeyboardButton("⏭ Skip Location")]],
+            one_time_keyboard=True,
+            resize_keyboard=True
+        )
+        
+        update.message.reply_text(
+            "Please share your location or skip:",
+            reply_markup=keyboard
+        )
+        
+        # 保存当前时间，以便后续使用
         now = get_current_time_for_user(user.id)
+        context.user_data['clockin_time'] = now
+        
+        # 注册位置处理器
+        context.dispatcher.add_handler(
+            MessageHandler(
+                Filters.location | Filters.regex('^⏭ Skip Location$'),
+                clockin_location_handler,
+                run_async=True
+            ),
+            group=1
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in clockin: {str(e)}")
+        update.message.reply_text(
+            "❌ An error occurred while clocking in. Please try again.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+def clockin_location_handler(update, context):
+    try:
+        user = update.effective_user
+        now = context.user_data.get('clockin_time', get_current_time_for_user(user.id))
         today = now.date()
-        clock_time = now.astimezone(pytz.UTC)  # 转换为 UTC 时间存储
+        clock_time = now.astimezone(pytz.UTC)
+        
+        # 处理位置信息
+        location_info = None
+        if update.message.location:
+            address = get_address_from_location(
+                update.message.location.latitude,
+                update.message.location.longitude
+            )
+            if address:
+                location_info = f"⟶ \"{address}\""
         
         conn = get_db_connection()
         try:
@@ -632,10 +680,37 @@ def clockin(update, context):
         
         # 显示用户时区的时间
         local_time = clock_time.astimezone(pytz.timezone(get_user_timezone(user.id)))
-        update.message.reply_text(f"✅ Clocked in at {format_local_time(local_time)}")
+        response = f"✅ Clocked in at {format_local_time(local_time)}"
+        
+        if location_info:
+            response += f"\n{location_info}"
+        elif update.message.text == "⏭ Skip Location":
+            response += "\n⟶ \"refuse report location\""
+        
+        update.message.reply_text(
+            response,
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # 移除位置处理器
+        context.dispatcher.remove_handler(
+            MessageHandler(
+                Filters.location | Filters.regex('^⏭ Skip Location$'),
+                clockin_location_handler
+            ),
+            group=1
+        )
+        
+        # 清理用户数据
+        if 'clockin_time' in context.user_data:
+            del context.user_data['clockin_time']
+            
     except Exception as e:
-        logger.error(f"Error in clockin: {str(e)}")
-        update.message.reply_text("❌ An error occurred while clocking in. Please try again.")
+        logger.error(f"Error in clockin_location_handler: {str(e)}")
+        update.message.reply_text(
+            "❌ An error occurred while processing your location. Your clock-in has been recorded.",
+            reply_markup=ReplyKeyboardRemove()
+        )
 
 def clockout(update, context):
     try:
@@ -1390,3 +1465,20 @@ def paid_end_date(update, context):
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
+
+def get_address_from_location(latitude, longitude):
+    """根据经纬度获取地址"""
+    try:
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={latitude},{longitude}&key={os.getenv('GOOGLE_API_KEY')}"
+        response = requests.get(url)
+        data = response.json()
+        
+        if data['status'] == 'OK' and data['results']:
+            # 获取第一个结果的格式化地址
+            return data['results'][0]['formatted_address']
+        else:
+            logger.error(f"Error getting address: {data}")
+            return None
+    except Exception as e:
+        logger.error(f"Error in get_address_from_location: {e}")
+        return None
