@@ -151,6 +151,9 @@ def get_db_connection():
     """获取数据库连接"""
     try:
         conn = db_pool.getconn()
+        # 设置连接的时区为马来西亚
+        with conn.cursor() as cur:
+            cur.execute("SET TIME ZONE 'Asia/Kuala_Lumpur';")
         return conn
     except psycopg2.pool.PoolError:
         logger.error("Connection pool exhausted, waiting for available connection...")
@@ -158,6 +161,9 @@ def get_db_connection():
         time.sleep(1)
         try:
             conn = db_pool.getconn()
+            # 设置连接的时区为马来西亚
+            with conn.cursor() as cur:
+                cur.execute("SET TIME ZONE 'Asia/Kuala_Lumpur';")
             return conn
         except Exception as e:
             logger.error(f"Failed to get database connection: {e}")
@@ -235,12 +241,16 @@ def update_driver(user_id, username=None, first_name=None, balance=None, monthly
     finally:
         release_db_connection(conn)
 
-def format_local_time(timestamp_str):
+def format_local_time(timestamp):
+    if isinstance(timestamp, datetime.datetime):
+        # 如果是 datetime 对象，直接格式化
+        return timestamp.strftime("%Y-%m-%d %H:%M")
     try:
-        dt = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+        # 尝试解析字符串
+        dt = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
         return dt.strftime("%Y-%m-%d %H:%M")
     except:
-        return timestamp_str
+        return timestamp
 
 def format_duration(hours):
     try:
@@ -556,9 +566,16 @@ def clockout(update, context):
                 (clock_time, user.id, today)
             )
             
-            # 计算工时
-            in_time = log[0]  # Already a datetime object
-            out_time = datetime.datetime.strptime(clock_time, "%Y-%m-%d %H:%M:%S")
+            # 获取马来西亚时区
+            tz = pytz.timezone("Asia/Kuala_Lumpur")
+            
+            # 将数据库中的时间转换为马来西亚时区
+            in_time = log[0].astimezone(tz)  # 确保是aware datetime
+            
+            # 将当前时间转换为aware datetime
+            out_time = tz.localize(datetime.datetime.strptime(clock_time, "%Y-%m-%d %H:%M:%S"))
+            
+            # 计算工时（现在两个时间都是aware datetime）
             hours_worked = (out_time - in_time).total_seconds() / 3600
             
             # 更新总工时
@@ -572,7 +589,7 @@ def clockout(update, context):
     
     time_str = format_duration(hours_worked)
     update.message.reply_text(
-        f"🏁 Clocked out at {format_local_time(clock_time)}. Worked {time_str}."
+        f"🏁 Clocked out at {format_local_time(now)}. Worked {time_str}."
     )
 
 def offday(update, context):
