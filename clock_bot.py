@@ -40,8 +40,8 @@ DEFAULT_MONTHLY_SALARY = float(os.getenv("DEFAULT_MONTHLY_SALARY", "3500.00"))
 WORKING_DAYS_PER_MONTH = int(os.getenv("WORKING_DAYS_PER_MONTH", "22"))
 WORKING_HOURS_PER_DAY = int(os.getenv("WORKING_HOURS_PER_DAY", "8"))
 
-# 设置时区
-os.environ['TZ'] = os.getenv('TZ', 'Asia/Kuala_Lumpur')
+# 修改：使用 UTC 作为默认时区，允许用户设置自己的时区
+DEFAULT_TIMEZONE = os.getenv('DEFAULT_TIMEZONE', 'UTC')
 
 # === 日志设置 ===
 logging.basicConfig(
@@ -74,10 +74,9 @@ def init_db():
     """初始化数据库和表结构"""
     global db_pool
     try:
-        # 创建数据库连接池，设置合理的连接数
         db_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=1,
-            maxconn=20,  # 增加最大连接数
+            maxconn=20,
             dsn=os.environ.get("DATABASE_URL")
         )
         logger.info("Database connection pool created successfully")
@@ -85,7 +84,7 @@ def init_db():
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 创建司机表
+                # 添加时区字段到 drivers 表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS drivers (
                     user_id BIGINT PRIMARY KEY,
@@ -94,6 +93,7 @@ def init_db():
                     balance FLOAT DEFAULT 0.0,
                     monthly_salary FLOAT DEFAULT 3500.0,
                     total_hours FLOAT DEFAULT 0.0,
+                    timezone TEXT DEFAULT 'UTC',
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
@@ -242,15 +242,14 @@ def update_driver(user_id, username=None, first_name=None, balance=None, monthly
         release_db_connection(conn)
 
 def format_local_time(timestamp):
+    """格式化时间为本地时间字符串"""
     if isinstance(timestamp, datetime.datetime):
-        # 如果是 datetime 对象，直接格式化
         return timestamp.strftime("%Y-%m-%d %H:%M")
     try:
-        # 尝试解析字符串
         dt = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
         return dt.strftime("%Y-%m-%d %H:%M")
     except:
-        return timestamp
+        return str(timestamp)
 
 def format_duration(hours):
     try:
@@ -492,7 +491,8 @@ def start(update, context):
         "🕑 /clockin\n"
         "🏁 /clockout\n"
         "📅 /offday\n"
-        "💸 /claim"
+        "💸 /claim\n"
+        "🌍 /timezone - Set your timezone"
     )
     if user.id in ADMIN_IDS:
         msg += (
@@ -510,7 +510,7 @@ def start(update, context):
 
 def clockin(update, context):
     user = update.effective_user
-    now = get_current_time()
+    now = get_current_time_for_user(user.id)
     today = now.date()
     clock_time = now.strftime("%Y-%m-%d %H:%M:%S")
     
@@ -542,7 +542,7 @@ def clockin(update, context):
 
 def clockout(update, context):
     user = update.effective_user
-    now = get_current_time()
+    now = get_current_time_for_user(user.id)
     today = now.date()
     clock_time = now.strftime("%Y-%m-%d %H:%M:%S")
     
@@ -566,14 +566,14 @@ def clockout(update, context):
                 (clock_time, user.id, today)
             )
             
-            # 获取马来西亚时区
-            tz = pytz.timezone("Asia/Kuala_Lumpur")
+            # 获取用户时区
+            user_tz = pytz.timezone(get_user_timezone(user.id))
             
-            # 将数据库中的时间转换为马来西亚时区
-            in_time = log[0].astimezone(tz)  # 确保是aware datetime
+            # 将数据库中的时间转换为用户时区
+            in_time = log[0].astimezone(user_tz)
             
             # 将当前时间转换为aware datetime
-            out_time = tz.localize(datetime.datetime.strptime(clock_time, "%Y-%m-%d %H:%M:%S"))
+            out_time = user_tz.localize(datetime.datetime.strptime(clock_time, "%Y-%m-%d %H:%M:%S"))
             
             # 计算工时（现在两个时间都是aware datetime）
             hours_worked = (out_time - in_time).total_seconds() / 3600
@@ -594,7 +594,7 @@ def clockout(update, context):
 
 def offday(update, context):
     user = update.effective_user
-    today = get_current_date()
+    today = get_current_date_for_user(user.id)
     
     conn = get_db_connection()
     try:
@@ -634,7 +634,7 @@ def check(update, context):
     if update.effective_user.id not in ADMIN_IDS:
         return
     
-    today = get_current_date()
+    today = get_current_date_for_user(update.effective_user.id)
     
     conn = get_db_connection()
     try:
@@ -961,7 +961,7 @@ def topup_amount(update, context):
         
         driver_id = context.user_data.get('selected_driver')
         admin_id = update.effective_user.id
-        date = datetime.datetime.now(pytz.timezone("Asia/Kuala_Lumpur")).strftime("%Y-%m-%d")
+        date = get_current_date_for_user(admin_id)
         
         conn = get_db_connection()
         try:
@@ -1085,7 +1085,7 @@ def claim_proof(update, context):
     try:
         user = update.effective_user
         photo_file = update.message.photo[-1].file_id
-        date = datetime.datetime.now(pytz.timezone("Asia/Kuala_Lumpur")).strftime("%Y-%m-%d")
+        date = get_current_date_for_user(user.id)
         
         conn = get_db_connection()
         try:
@@ -1250,30 +1250,72 @@ def webhook_status():
     except Exception as e:
         return {"error": str(e)}
 
-# === 时间处理工具 ===
-def get_current_time():
-    """获取当前时间（马来西亚时区）"""
-    return datetime.datetime.now(pytz.timezone("Asia/Kuala_Lumpur"))
+# === 时间处理工具更新 ===
+def get_user_timezone(user_id):
+    """获取用户的时区设置"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT timezone FROM drivers WHERE user_id = %s", (user_id,))
+            result = cur.fetchone()
+            return result[0] if result else DEFAULT_TIMEZONE
+    finally:
+        release_db_connection(conn)
 
-def get_current_date():
-    """获取当前日期（马来西亚时区）"""
-    return get_current_time().date()
+def get_current_time_for_user(user_id):
+    """获取用户所在时区的当前时间"""
+    timezone = get_user_timezone(user_id)
+    return datetime.datetime.now(pytz.timezone(timezone))
 
-def format_datetime(dt):
-    """格式化日期时间"""
-    if isinstance(dt, str):
+def get_current_date_for_user(user_id):
+    """获取用户所在时区的当前日期"""
+    return get_current_time_for_user(user_id).date()
+
+# === 添加时区设置命令 ===
+def set_timezone(update, context):
+    """设置用户时区"""
+    try:
+        if len(context.args) != 1:
+            update.message.reply_text(
+                "Please provide a valid timezone.\n"
+                "Example: /timezone Asia/Tokyo"
+            )
+            return
+
+        timezone_name = context.args[0]
         try:
-            dt = datetime.datetime.strptime(dt, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return dt
-    return dt.strftime("%Y-%m-%d %H:%M")
+            # 验证时区是否有效
+            pytz.timezone(timezone_name)
+        except pytz.exceptions.UnknownTimeZoneError:
+            update.message.reply_text(
+                "❌ Invalid timezone. Please use a valid timezone name.\n"
+                "Example: Asia/Tokyo, America/New_York, Europe/London"
+            )
+            return
 
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE drivers SET timezone = %s WHERE user_id = %s",
+                    (timezone_name, update.effective_user.id)
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+
+        update.message.reply_text(f"✅ Timezone set to {timezone_name}")
+    except Exception as e:
+        logger.error(f"Error setting timezone: {e}")
+        update.message.reply_text("❌ An error occurred while setting timezone")
+
+# === 更新 init_bot 函数 ===
 def init_bot():
     """初始化 Telegram Bot 和 Dispatcher"""
     global dispatcher
     dispatcher = Dispatcher(bot, None, use_context=True)
     
-    # 注册命令处理器
+    # 注册基本命令处理器
     dispatcher.add_handler(CommandHandler("start", start))
     dispatcher.add_handler(CommandHandler("clockin", clockin))
     dispatcher.add_handler(CommandHandler("clockout", clockout))
@@ -1282,9 +1324,21 @@ def init_bot():
     dispatcher.add_handler(CommandHandler("check", check))
     dispatcher.add_handler(CommandHandler("viewclaims", viewclaims))
     dispatcher.add_handler(CommandHandler("PDF", pdf_start))
+    dispatcher.add_handler(CommandHandler("timezone", set_timezone))  # 新增时区设置命令
     dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r'^all|\d+$'))
 
-    # 注册对话处理器
+    # 确保 paid 命令处理器被正确注册
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("paid", paid_start)],
+        states={
+            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
+            PAID_START_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_start_date)],
+            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    ))
+
+    # 其他对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("salary", salary_start)],
         states={
@@ -1310,17 +1364,6 @@ def init_bot():
             CLAIM_OTHER_TYPE: [MessageHandler(Filters.text & ~Filters.command, claim_other_type)],
             CLAIM_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, claim_amount)],
             CLAIM_PROOF: [MessageHandler(Filters.photo, claim_proof)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    # 更新PAID命令处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("paid", paid_start)],
-        states={
-            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
-            PAID_START_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_start_date)],
-            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
