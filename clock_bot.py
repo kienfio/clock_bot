@@ -104,7 +104,7 @@ def init_db():
                     balance FLOAT DEFAULT 0.0,
                     monthly_salary FLOAT DEFAULT 3500.0,
                     total_hours FLOAT DEFAULT 0.0,
-                    timezone TEXT DEFAULT 'UTC',  -- 确保添加 timezone 列
+                    timezone TEXT DEFAULT 'UTC',
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
@@ -134,11 +134,27 @@ def init_db():
                     clock_in TIMESTAMP WITH TIME ZONE,
                     clock_out TIMESTAMP WITH TIME ZONE,
                     is_off BOOLEAN DEFAULT FALSE,
+                    location_address TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id, date)
                 )
                 """)
                 logger.info("创建 clock_logs 表成功")
+                
+                # 确保 location_address 列存在
+                cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='clock_logs' AND column_name='location_address'
+                    ) THEN
+                        ALTER TABLE clock_logs ADD COLUMN location_address TEXT;
+                    END IF;
+                END $$;
+                """)
+                logger.info("确保 clock_logs 表存在 location_address 列")
                 
                 # 3. 充值记录表
                 cur.execute("""
@@ -556,16 +572,78 @@ def handle_location(update, context):
         user = update.effective_user
         location = update.message.location
         
-        # 更新用户时区
-        timezone = update_user_timezone(user.id, location.latitude, location.longitude)
+        # 获取地址
+        address = get_address_from_location(location.latitude, location.longitude)
         
+        # 获取打卡时间
+        clockin_time = context.user_data.get('clockin_time', '')
+        
+        # 更新打卡记录中的地址
+        today = get_current_date_for_user(user.id)
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE clock_logs SET location_address = %s WHERE user_id = %s AND date = %s",
+                    (address, user.id, today)
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+        
+        # 显示带地址的打卡确认
         update.message.reply_text(
-            f"✅ Your location has been received. Your timezone is set to: {timezone}\n"
-            "Your time will be automatically adjusted based on this timezone."
+            f"✅ Clocked in at {clockin_time}\n"
+            f"⟶ \"{address}\"",
+            reply_markup=ReplyKeyboardRemove()
         )
+        
+        # 清理用户数据
+        if 'clockin_time' in context.user_data:
+            del context.user_data['clockin_time']
+            
     except Exception as e:
         logger.error(f"Error in handle_location: {e}")
-        update.message.reply_text("❌ Failed to process your location. Please try again later.")
+        update.message.reply_text(
+            "❌ Failed to process your location. Please try again later.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+def handle_text_after_clockin(update, context):
+    """处理打卡后的文本消息（可能拒绝位置）"""
+    try:
+        user = update.effective_user
+        message = update.message.text
+        
+        # 检查是否是打卡后的消息且是跳过位置的选项
+        if 'clockin_time' in context.user_data and message == "Skip Location ⏭":
+            clockin_time = context.user_data['clockin_time']
+            
+            # 更新打卡记录为拒绝位置
+            today = get_current_date_for_user(user.id)
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE clock_logs SET location_address = 'refuse report location' "
+                        "WHERE user_id = %s AND date = %s",
+                        (user.id, today)
+                    )
+                    conn.commit()
+            finally:
+                release_db_connection(conn)
+            
+            # 显示拒绝位置的消息
+            update.message.reply_text(
+                f"✅ Clocked in at {clockin_time}\n"
+                "⟶ \"refuse report location\"",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            
+            # 清理用户数据
+            del context.user_data['clockin_time']
+    except Exception as e:
+        logger.error(f"Error in handle_text_after_clockin: {e}")
 
 # === 命令处理函数 ===
 def start(update, context):
@@ -602,57 +680,9 @@ def start(update, context):
 def clockin(update, context):
     try:
         user = update.effective_user
-        
-        # 请求位置信息
-        keyboard = ReplyKeyboardMarkup(
-            [[KeyboardButton("📍 Share Location", request_location=True)], 
-             [KeyboardButton("⏭ Skip Location")]],
-            one_time_keyboard=True,
-            resize_keyboard=True
-        )
-        
-        update.message.reply_text(
-            "Please share your location or skip:",
-            reply_markup=keyboard
-        )
-        
-        # 保存当前时间，以便后续使用
         now = get_current_time_for_user(user.id)
-        context.user_data['clockin_time'] = now
-        
-        # 注册位置处理器
-        context.dispatcher.add_handler(
-            MessageHandler(
-                Filters.location | Filters.regex('^⏭ Skip Location$'),
-                clockin_location_handler,
-                run_async=True
-            ),
-            group=1
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in clockin: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred while clocking in. Please try again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
-def clockin_location_handler(update, context):
-    try:
-        user = update.effective_user
-        now = context.user_data.get('clockin_time', get_current_time_for_user(user.id))
         today = now.date()
         clock_time = now.astimezone(pytz.UTC)
-        
-        # 处理位置信息
-        location_info = None
-        if update.message.location:
-            address = get_address_from_location(
-                update.message.location.latitude,
-                update.message.location.longitude
-            )
-            if address:
-                location_info = f"⟶ \"{address}\""
         
         conn = get_db_connection()
         try:
@@ -680,35 +710,27 @@ def clockin_location_handler(update, context):
         
         # 显示用户时区的时间
         local_time = clock_time.astimezone(pytz.timezone(get_user_timezone(user.id)))
-        response = f"✅ Clocked in at {format_local_time(local_time)}"
+        time_str = format_local_time(local_time)
         
-        if location_info:
-            response += f"\n{location_info}"
-        elif update.message.text == "⏭ Skip Location":
-            response += "\n⟶ \"refuse report location\""
+        # 请求位置
+        keyboard = [
+            [KeyboardButton("Share Location 📍", request_location=True)],
+            [KeyboardButton("Skip Location ⏭")]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        
+        # 存储打卡时间用于后续地址处理
+        context.user_data['clockin_time'] = time_str
         
         update.message.reply_text(
-            response,
-            reply_markup=ReplyKeyboardRemove()
+            f"✅ Clocked in at {time_str}\n"
+            "Please share your location or skip:",
+            reply_markup=reply_markup
         )
-        
-        # 移除位置处理器
-        context.dispatcher.remove_handler(
-            MessageHandler(
-                Filters.location | Filters.regex('^⏭ Skip Location$'),
-                clockin_location_handler
-            ),
-            group=1
-        )
-        
-        # 清理用户数据
-        if 'clockin_time' in context.user_data:
-            del context.user_data['clockin_time']
-            
     except Exception as e:
-        logger.error(f"Error in clockin_location_handler: {str(e)}")
+        logger.error(f"Error in clockin: {str(e)}")
         update.message.reply_text(
-            "❌ An error occurred while processing your location. Your clock-in has been recorded.",
+            "❌ An error occurred while clocking in. Please try again.",
             reply_markup=ReplyKeyboardRemove()
         )
 
@@ -1164,6 +1186,15 @@ def init_bot():
     dispatcher.add_handler(CommandHandler("PDF", pdf_start))
     dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r'^all|\d+$'))
 
+    # 添加位置处理器
+    dispatcher.add_handler(MessageHandler(Filters.location, handle_location))
+    
+    # 添加打卡后文本消息处理器（处理拒绝位置的情况）
+    dispatcher.add_handler(MessageHandler(
+        Filters.text & ~Filters.command, 
+        handle_text_after_clockin
+    ))
+
     # 添加 PAID 命令处理程序
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("paid", paid_start)],
@@ -1474,11 +1505,11 @@ def get_address_from_location(latitude, longitude):
         data = response.json()
         
         if data['status'] == 'OK' and data['results']:
-            # 获取第一个结果的格式化地址
+            # 获取最精确的地址
             return data['results'][0]['formatted_address']
         else:
             logger.error(f"Error getting address: {data}")
-            return None
+            return "Address not available"
     except Exception as e:
         logger.error(f"Error in get_address_from_location: {e}")
-        return None
+        return "Address lookup failed"
