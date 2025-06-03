@@ -557,7 +557,7 @@ def clockout(update, context):
             )
             
             # 计算工时
-            in_time = datetime.datetime.strptime(log[0], "%Y-%m-%d %H:%M:%S")
+            in_time = log[0]  # Already a datetime object
             out_time = datetime.datetime.strptime(clock_time, "%Y-%m-%d %H:%M:%S")
             hours_worked = (out_time - in_time).total_seconds() / 3600
             
