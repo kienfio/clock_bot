@@ -74,18 +74,28 @@ db_pool = None
 def init_db():
     """初始化数据库和表结构"""
     global db_pool
+    
+    # 从环境变量获取数据库连接信息
+    DATABASE_URL = os.environ.get("DATABASE_URL")
+    
+    if not DATABASE_URL:
+        raise ValueError("需要设置 DATABASE_URL 环境变量")
+    
+    logger.info("开始初始化数据库...")
+    
     try:
+        # 创建连接池
         db_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=1,
             maxconn=20,
-            dsn=os.environ.get("DATABASE_URL")
+            dsn=DATABASE_URL
         )
-        logger.info("Database connection pool created successfully")
+        logger.info("数据库连接池创建成功")
         
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 创建 drivers 表（添加 timezone 列）
+                # 1. 创建 drivers 表（添加 timezone 列）
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS drivers (
                     user_id BIGINT PRIMARY KEY,
@@ -98,6 +108,7 @@ def init_db():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
+                logger.info("创建 drivers 表成功")
                 
                 # 确保 timezone 列存在（兼容旧表结构）
                 cur.execute("""
@@ -112,8 +123,9 @@ def init_db():
                     END IF;
                 END $$;
                 """)
+                logger.info("确保 drivers 表存在 timezone 列")
                 
-                # 打卡记录表
+                # 2. 打卡记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS clock_logs (
                     id SERIAL PRIMARY KEY,
@@ -126,8 +138,9 @@ def init_db():
                     UNIQUE(user_id, date)
                 )
                 """)
+                logger.info("创建 clock_logs 表成功")
                 
-                # 充值记录表
+                # 3. 充值记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS topups (
                     id SERIAL PRIMARY KEY,
@@ -138,8 +151,9 @@ def init_db():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
+                logger.info("创建 topups 表成功")
                 
-                # 报销记录表
+                # 4. 报销记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS claims (
                     id SERIAL PRIMARY KEY,
@@ -152,15 +166,26 @@ def init_db():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
+                logger.info("创建 claims 表成功")
+                
+                # 5. 创建索引
+                cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
+                CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
+                CREATE INDEX IF NOT EXISTS idx_topups_user_date ON topups(user_id, date);
+                CREATE INDEX IF NOT EXISTS idx_drivers_timezone ON drivers(timezone);
+                """)
+                logger.info("创建索引成功")
+                
                 conn.commit()
-                logger.info("Database tables created/updated successfully")
+                logger.info("数据库初始化完成！")
         finally:
             release_db_connection(conn)
+            
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"数据库初始化失败: {str(e)}")
         raise
 
-# === 数据库工具函数 ===
 def get_db_connection():
     """获取数据库连接"""
     try:
@@ -170,7 +195,7 @@ def get_db_connection():
             cur.execute("SET TIME ZONE 'UTC';")
         return conn
     except psycopg2.pool.PoolError:
-        logger.error("Connection pool exhausted, waiting for available connection...")
+        logger.error("连接池已满，等待可用连接...")
         # 等待一会儿再试
         time.sleep(1)
         try:
@@ -180,7 +205,7 @@ def get_db_connection():
                 cur.execute("SET TIME ZONE 'UTC';")
             return conn
         except Exception as e:
-            logger.error(f"Failed to get database connection: {e}")
+            logger.error(f"获取数据库连接失败: {e}")
             raise
 
 def release_db_connection(conn):
@@ -766,7 +791,8 @@ def salary_start(update, context):
     """开始设置薪资"""
     try:
         if update.effective_user.id not in ADMIN_IDS:
-            return
+            update.message.reply_text("❌ You don't have permission to use this command.")
+            return ConversationHandler.END
         
         # 清理之前的状态
         context.user_data.clear()
@@ -779,16 +805,22 @@ def salary_start(update, context):
         finally:
             release_db_connection(conn)
         
+        if not drivers:
+            update.message.reply_text("❌ No drivers found in the system.")
+            return ConversationHandler.END
+        
         keyboard = [[f"{driver[1]} (ID: {driver[0]})"] for driver in drivers]
         context.user_data['salary_drivers'] = {f"{driver[1]} (ID: {driver[0]})": driver[0] for driver in drivers}
         
         update.message.reply_text(
-            "👤 Select driver to set salary:",
+            "👤 Select driver to set salary:\n"
+            "Or use /cancel to cancel this operation.",
             reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         )
         return SALARY_SELECT_DRIVER
     except Exception as e:
         logger.error(f"Error in salary_start: {str(e)}")
+        context.user_data.clear()  # 确保清理状态
         update.message.reply_text(
             "❌ An error occurred. Please try /salary command again.",
             reply_markup=ReplyKeyboardRemove()
@@ -797,10 +829,19 @@ def salary_start(update, context):
 
 def salary_select_driver(update, context):
     try:
+        if update.message.text.startswith('/'):  # 如果是命令，结束对话
+            context.user_data.clear()
+            update.message.reply_text(
+                "❌ Operation cancelled due to new command.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
+            
         selected = update.message.text
         drivers = context.user_data.get('salary_drivers', {})
         
         if selected not in drivers:
+            context.user_data.clear()
             update.message.reply_text(
                 "❌ Invalid selection.",
                 reply_markup=ReplyKeyboardRemove()
@@ -809,12 +850,14 @@ def salary_select_driver(update, context):
         
         context.user_data['selected_driver'] = drivers[selected]
         update.message.reply_text(
-            "💰 Enter monthly salary (RM):",
+            "💰 Enter monthly salary (RM):\n"
+            "Or use /cancel to cancel this operation.",
             reply_markup=ReplyKeyboardRemove()
         )
         return SALARY_ENTER_AMOUNT
     except Exception as e:
         logger.error(f"Error in salary_select_driver: {str(e)}")
+        context.user_data.clear()  # 确保清理状态
         update.message.reply_text(
             "❌ An error occurred. Please try /salary command again.",
             reply_markup=ReplyKeyboardRemove()
@@ -823,16 +866,34 @@ def salary_select_driver(update, context):
 
 def salary_enter_amount(update, context):
     try:
+        if update.message.text.startswith('/'):  # 如果是命令，结束对话
+            context.user_data.clear()
+            update.message.reply_text(
+                "❌ Operation cancelled due to new command.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
+            
         try:
             amount = float(update.message.text)
+            if amount <= 0:
+                raise ValueError("Salary must be positive")
         except ValueError:
             update.message.reply_text(
-                "❌ Please enter a valid number.",
+                "❌ Please enter a valid positive number.\n"
+                "Or use /cancel to cancel this operation.",
                 reply_markup=ReplyKeyboardRemove()
             )
             return SALARY_ENTER_AMOUNT
         
         driver_id = context.user_data.get('selected_driver')
+        if not driver_id:
+            context.user_data.clear()
+            update.message.reply_text(
+                "❌ Session expired. Please try /salary command again.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
         
         conn = get_db_connection()
         try:
@@ -857,342 +918,9 @@ def salary_enter_amount(update, context):
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error in salary_enter_amount: {str(e)}")
+        context.user_data.clear()  # 确保清理状态
         update.message.reply_text(
             "❌ An error occurred. Please try /salary command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-# === PDF 生成功能 ===
-def pdf_start(update, context):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    
-    with db_pool.getconn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT user_id, first_name, username FROM drivers")
-            drivers = cur.fetchall()
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 All Drivers", callback_data="all")]
-    ]
-    
-    # Add individual driver buttons
-    for driver in drivers:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"@{driver[2]}" if driver[2] else driver[1],
-                callback_data=str(driver[0])
-            )
-        ])
-    
-    update.message.reply_text(
-        "🧾 Select driver for PDF report:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-def pdf_button_callback(update, context):
-    query = update.callback_query
-    query.answer()
-    
-    if query.data == "all":
-        query.edit_message_text("🔄 Generating reports for all drivers...")
-        generate_all_pdfs(query)
-    else:
-        query.edit_message_text("🔄 Generating report...")
-        generate_single_pdf(query, int(query.data))
-
-def generate_all_pdfs(query):
-    try:
-        temp_dir = tempfile.mkdtemp()
-        
-        with db_pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id, first_name, username FROM drivers")
-                drivers = cur.fetchall()
-        
-        for driver in drivers:
-            driver_id, first_name, username = driver
-            name = f"@{username}" if username else first_name
-            output_path = os.path.join(temp_dir, f"driver_{driver_id}.pdf")
-            generate_driver_pdf(driver_id, name, bot, output_path)
-            
-            with open(output_path, 'rb') as f:
-                bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=f,
-                    caption=f"Report for {name}"
-                )
-        
-        query.edit_message_text("✅ All reports generated")
-    except Exception as e:
-        logger.error(f"PDF generation error: {e}")
-        query.edit_message_text(f"❌ Error: {str(e)}")
-
-def generate_single_pdf(query, driver_id):
-    try:
-        with db_pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT first_name, username FROM drivers WHERE user_id = %s",
-                    (driver_id,)
-                )
-                driver = cur.fetchone()
-        
-        if not driver:
-            query.edit_message_text("❌ Driver not found")
-            return
-        
-        name = f"@{driver[1]}" if driver[1] else driver[0]
-        temp_dir = tempfile.mkdtemp()
-        output_path = os.path.join(temp_dir, f"driver_{driver_id}.pdf")
-        
-        generate_driver_pdf(driver_id, name, bot, output_path)
-        
-        with open(output_path, 'rb') as f:
-            bot.send_document(
-                chat_id=query.message.chat_id,
-                document=f,
-                caption=f"Report for {name}"
-            )
-        
-        query.edit_message_text("✅ Report generated")
-    except Exception as e:
-        logger.error(f"PDF generation error: {e}")
-        query.edit_message_text(f"❌ Error: {str(e)}")
-
-# === 充值功能 ===
-def topup_start(update, context):
-    """开始充值流程"""
-    try:
-        if update.effective_user.id not in ADMIN_IDS:
-            return
-        
-        # 清理之前的状态
-        context.user_data.clear()
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id, first_name, username FROM drivers")
-                drivers = cur.fetchall()
-        finally:
-            release_db_connection(conn)
-        
-        keyboard = [[f"{driver[1]} (ID: {driver[0]})"] for driver in drivers]
-        context.user_data['topup_drivers'] = {f"{driver[1]} (ID: {driver[0]})": driver[0] for driver in drivers}
-        
-        update.message.reply_text(
-            "👤 Select driver to top up:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
-        return TOPUP_USER
-    except Exception as e:
-        logger.error(f"Error in topup_start: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /topup command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def topup_user(update, context):
-    try:
-        selected = update.message.text
-        drivers = context.user_data.get('topup_drivers', {})
-        
-        if selected not in drivers:
-            update.message.reply_text(
-                "❌ Invalid selection.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return ConversationHandler.END
-        
-        context.user_data['selected_driver'] = drivers[selected]
-        update.message.reply_text(
-            "💰 Enter amount (RM):",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return TOPUP_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in topup_user: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /topup command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def topup_amount(update, context):
-    try:
-        try:
-            amount = float(update.message.text)
-        except ValueError:
-            update.message.reply_text(
-                "❌ Please enter a valid number.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return TOPUP_AMOUNT
-        
-        driver_id = context.user_data.get('selected_driver')
-        admin_id = update.effective_user.id
-        date = get_current_date_for_user(admin_id)
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 更新余额
-                cur.execute(
-                    "UPDATE drivers SET balance = balance + %s WHERE user_id = %s",
-                    (amount, driver_id)
-                )
-                
-                # 记录充值
-                cur.execute(
-                    "INSERT INTO topups (user_id, amount, date, admin_id) VALUES (%s, %s, %s, %s)",
-                    (driver_id, amount, date, admin_id)
-                )
-                conn.commit()
-        finally:
-            release_db_connection(conn)
-        
-        update.message.reply_text(
-            f"✅ Topped up RM{amount:.2f}",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # 清理状态
-        context.user_data.clear()
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error in topup_amount: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /topup command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-# === 报销功能 ===
-def claim_start(update, context):
-    """开始报销流程"""
-    try:
-        # 清理之前的状态
-        context.user_data.clear()
-        
-        keyboard = [["Toll", "Petrol"], ["Parking", "Other"]]
-        update.message.reply_text(
-            "🚗 Select claim type:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
-        return CLAIM_TYPE
-    except Exception as e:
-        logger.error(f"Error in claim_start: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_type(update, context):
-    try:
-        claim_type = update.message.text
-        context.user_data['claim_type'] = claim_type
-        
-        if claim_type.lower() == "other":
-            update.message.reply_text(
-                "✍️ Please describe the claim type:",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return CLAIM_OTHER_TYPE
-        
-        update.message.reply_text(
-            "💰 Enter amount (RM):",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return CLAIM_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in claim_type: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_other_type(update, context):
-    try:
-        context.user_data['claim_type'] = update.message.text
-        update.message.reply_text(
-            "💰 Enter amount (RM):",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return CLAIM_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in claim_other_type: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_amount(update, context):
-    try:
-        try:
-            amount = float(update.message.text)
-        except ValueError:
-            update.message.reply_text(
-                "❌ Please enter a valid number.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return CLAIM_AMOUNT
-            
-        context.user_data['claim_amount'] = amount
-        update.message.reply_text("📎 Please send a photo of the receipt:")
-        return CLAIM_PROOF
-    except Exception as e:
-        logger.error(f"Error in claim_amount: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_proof(update, context):
-    try:
-        user = update.effective_user
-        photo_file = update.message.photo[-1].file_id
-        date = get_current_date_for_user(user.id)
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 记录报销
-                cur.execute(
-                    "INSERT INTO claims (user_id, type, amount, date, photo_file_id) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (user.id, context.user_data['claim_type'], 
-                     context.user_data['claim_amount'], date, photo_file)
-                )
-                
-                # 扣除余额
-                cur.execute(
-                    "UPDATE drivers SET balance = balance - %s WHERE user_id = %s",
-                    (context.user_data['claim_amount'], user.id)
-                )
-                conn.commit()
-        finally:
-            release_db_connection(conn)
-        
-        update.message.reply_text(
-            f"✅ Claim submitted for {context.user_data['claim_type']}: "
-            f"RM{context.user_data['claim_amount']:.2f}",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # 清理状态
-        context.user_data.clear()
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error in claim_proof: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
