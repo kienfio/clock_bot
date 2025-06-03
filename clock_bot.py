@@ -85,7 +85,7 @@ def init_db():
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 添加时区字段到 drivers 表
+                # 创建 drivers 表（添加 timezone 列）
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS drivers (
                     user_id BIGINT PRIMARY KEY,
@@ -94,9 +94,23 @@ def init_db():
                     balance FLOAT DEFAULT 0.0,
                     monthly_salary FLOAT DEFAULT 3500.0,
                     total_hours FLOAT DEFAULT 0.0,
-                    timezone TEXT DEFAULT 'UTC',
+                    timezone TEXT DEFAULT 'UTC',  -- 确保添加 timezone 列
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
+                """)
+                
+                # 确保 timezone 列存在（兼容旧表结构）
+                cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='drivers' AND column_name='timezone'
+                    ) THEN
+                        ALTER TABLE drivers ADD COLUMN timezone TEXT DEFAULT 'UTC';
+                    END IF;
+                END $$;
                 """)
                 
                 # 打卡记录表
@@ -139,10 +153,9 @@ def init_db():
                 )
                 """)
                 conn.commit()
-                logger.info("Database tables created successfully")
+                logger.info("Database tables created/updated successfully")
         finally:
             release_db_connection(conn)
-            
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         raise
@@ -538,14 +551,9 @@ def start(update, context):
         first_name=user.first_name
     )
     
-    # 创建位置共享按钮的键盘
-    keyboard = KeyboardButton(text="Share Location 📍", request_location=True)
-    reply_markup = ReplyKeyboardMarkup([[keyboard]], one_time_keyboard=True)
-    
     msg = (
         f"👋 Hello {user.first_name}!\n"
         "Welcome to Driver ClockIn Bot.\n\n"
-        "🌍 Please share your location to set your timezone automatically.\n\n"
         "Available Commands:\n"
         "🕑 /clockin\n"
         "🏁 /clockout\n"
@@ -561,10 +569,10 @@ def start(update, context):
             "💵 /topup\n"
             "📷 /viewclaims\n"
             "💰 /salary\n"
-            "🟢 /paid"
+            "🟢 /paid"  # 添加 paid 命令
         )
 
-    update.message.reply_text(msg, reply_markup=reply_markup)
+    update.message.reply_text(msg)
 
 def clockin(update, context):
     try:
@@ -1352,9 +1360,17 @@ def init_bot():
     dispatcher.add_handler(CommandHandler("viewclaims", viewclaims))
     dispatcher.add_handler(CommandHandler("PDF", pdf_start))
     dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r'^all|\d+$'))
-    
-    # 添加位置处理器
-    dispatcher.add_handler(MessageHandler(Filters.location, handle_location))
+
+    # 添加 PAID 命令处理程序
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("paid", paid_start)],
+        states={
+            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
+            PAID_START_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_start_date)],
+            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    ))
 
     # 其他对话处理器
     dispatcher.add_handler(ConversationHandler(
