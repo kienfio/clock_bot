@@ -50,6 +50,7 @@ def init_database():
             clock_in TIMESTAMP WITH TIME ZONE,
             clock_out TIMESTAMP WITH TIME ZONE,
             is_off BOOLEAN DEFAULT FALSE,
+            location_address TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, date)
         )
