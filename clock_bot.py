@@ -151,9 +151,9 @@ def get_db_connection():
     """获取数据库连接"""
     try:
         conn = db_pool.getconn()
-        # 设置连接的时区为马来西亚
+        # 设置连接的时区为 UTC
         with conn.cursor() as cur:
-            cur.execute("SET TIME ZONE 'Asia/Kuala_Lumpur';")
+            cur.execute("SET TIME ZONE 'UTC';")
         return conn
     except psycopg2.pool.PoolError:
         logger.error("Connection pool exhausted, waiting for available connection...")
@@ -161,9 +161,9 @@ def get_db_connection():
         time.sleep(1)
         try:
             conn = db_pool.getconn()
-            # 设置连接的时区为马来西亚
+            # 设置连接的时区为 UTC
             with conn.cursor() as cur:
-                cur.execute("SET TIME ZONE 'Asia/Kuala_Lumpur';")
+                cur.execute("SET TIME ZONE 'UTC';")
             return conn
         except Exception as e:
             logger.error(f"Failed to get database connection: {e}")
@@ -509,107 +509,114 @@ def start(update, context):
     update.message.reply_text(msg)
 
 def clockin(update, context):
-    user = update.effective_user
-    now = get_current_time_for_user(user.id)
-    today = now.date()
-    clock_time = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            # 检查是否已有记录
-            cur.execute(
-                "SELECT 1 FROM clock_logs WHERE user_id = %s AND date = %s",
-                (user.id, today)
-            )
-            if cur.fetchone():
-                # 更新记录
+        user = update.effective_user
+        now = get_current_time_for_user(user.id)
+        today = now.date()
+        clock_time = now.astimezone(pytz.UTC)  # 转换为 UTC 时间存储
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 检查是否已有记录
                 cur.execute(
-                    "UPDATE clock_logs SET clock_in = %s, is_off = FALSE WHERE user_id = %s AND date = %s",
-                    (clock_time, user.id, today)
+                    "SELECT 1 FROM clock_logs WHERE user_id = %s AND date = %s",
+                    (user.id, today)
                 )
-            else:
-                # 插入新记录
-                cur.execute(
-                    "INSERT INTO clock_logs (user_id, date, clock_in) VALUES (%s, %s, %s)",
-                    (user.id, today, clock_time)
-                )
-            conn.commit()
-    finally:
-        release_db_connection(conn)
-    
-    update.message.reply_text(f"✅ Clocked in at {format_local_time(clock_time)}")
+                if cur.fetchone():
+                    # 更新记录
+                    cur.execute(
+                        "UPDATE clock_logs SET clock_in = %s, is_off = FALSE WHERE user_id = %s AND date = %s",
+                        (clock_time, user.id, today)
+                    )
+                else:
+                    # 插入新记录
+                    cur.execute(
+                        "INSERT INTO clock_logs (user_id, date, clock_in) VALUES (%s, %s, %s)",
+                        (user.id, today, clock_time)
+                    )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+        
+        # 显示用户时区的时间
+        local_time = clock_time.astimezone(pytz.timezone(get_user_timezone(user.id)))
+        update.message.reply_text(f"✅ Clocked in at {format_local_time(local_time)}")
+    except Exception as e:
+        logger.error(f"Error in clockin: {str(e)}")
+        update.message.reply_text("❌ An error occurred while clocking in. Please try again.")
 
 def clockout(update, context):
-    user = update.effective_user
-    now = get_current_time_for_user(user.id)
-    today = now.date()
-    clock_time = now.strftime("%Y-%m-%d %H:%M:%S")
-    
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            # 检查是否已打卡
-            cur.execute(
-                "SELECT clock_in FROM clock_logs WHERE user_id = %s AND date = %s",
-                (user.id, today)
-            )
-            log = cur.fetchone()
-            
-            if not log or not log[0] or log[0] == "OFF":
-                update.message.reply_text("❌ You haven't clocked in today.")
-                return
-            
-            # 更新打卡时间 
-            cur.execute(
-                "UPDATE clock_logs SET clock_out = %s WHERE user_id = %s AND date = %s",
-                (clock_time, user.id, today)
-            )
-            
-            # 获取用户时区
-            user_tz = pytz.timezone(get_user_timezone(user.id))
-            
-            # 将数据库中的时间转换为用户时区
-            in_time = log[0].astimezone(user_tz)
-            
-            # 将当前时间转换为aware datetime
-            out_time = user_tz.localize(datetime.datetime.strptime(clock_time, "%Y-%m-%d %H:%M:%S"))
-            
-            # 计算工时（现在两个时间都是aware datetime）
-            hours_worked = (out_time - in_time).total_seconds() / 3600
-            
-            # 更新总工时
-            cur.execute(
-                "UPDATE drivers SET total_hours = total_hours + %s WHERE user_id = %s",
-                (hours_worked, user.id)
-            )
-            conn.commit()
-    finally:
-        release_db_connection(conn)
-    
-    time_str = format_duration(hours_worked)
-    update.message.reply_text(
-        f"🏁 Clocked out at {format_local_time(now)}. Worked {time_str}."
-    )
+        user = update.effective_user
+        now = get_current_time_for_user(user.id)
+        today = now.date()
+        clock_time = now.astimezone(pytz.UTC)  # 转换为 UTC 时间存储
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 检查是否已打卡
+                cur.execute(
+                    "SELECT clock_in FROM clock_logs WHERE user_id = %s AND date = %s",
+                    (user.id, today)
+                )
+                log = cur.fetchone()
+                
+                if not log or not log[0]:
+                    update.message.reply_text("❌ You haven't clocked in today.")
+                    return
+                
+                # 更新打卡时间 
+                cur.execute(
+                    "UPDATE clock_logs SET clock_out = %s WHERE user_id = %s AND date = %s",
+                    (clock_time, user.id, today)
+                )
+                
+                # 计算工时（使用 UTC 时间计算）
+                in_time = log[0]  # 数据库中存储的是 UTC 时间
+                hours_worked = (clock_time - in_time).total_seconds() / 3600
+                
+                # 更新总工时
+                cur.execute(
+                    "UPDATE drivers SET total_hours = total_hours + %s WHERE user_id = %s",
+                    (hours_worked, user.id)
+                )
+                conn.commit()
+                
+                # 显示用户时区的时间
+                local_time = clock_time.astimezone(pytz.timezone(get_user_timezone(user.id)))
+                time_str = format_duration(hours_worked)
+                update.message.reply_text(
+                    f"🏁 Clocked out at {format_local_time(local_time)}. Worked {time_str}."
+                )
+        finally:
+            release_db_connection(conn)
+    except Exception as e:
+        logger.error(f"Error in clockout: {str(e)}")
+        update.message.reply_text("❌ An error occurred while clocking out. Please try again.")
 
 def offday(update, context):
-    user = update.effective_user
-    today = get_current_date_for_user(user.id)
-    
-    conn = get_db_connection()
     try:
-        with conn.cursor() as cur:
-            # 标记休息日
-            cur.execute(
-                "INSERT INTO clock_logs (user_id, date, is_off) VALUES (%s, %s, TRUE) "
-                "ON CONFLICT (user_id, date) DO UPDATE SET is_off = TRUE, clock_in = NULL, clock_out = NULL",
-                (user.id, today)
-            )
-            conn.commit()
-    finally:
-        release_db_connection(conn)
-    
-    update.message.reply_text(f"📅 Marked {today} as off day.")
+        user = update.effective_user
+        today = get_current_date_for_user(user.id)
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 标记休息日
+                cur.execute(
+                    "INSERT INTO clock_logs (user_id, date, is_off) VALUES (%s, %s, TRUE) "
+                    "ON CONFLICT (user_id, date) DO UPDATE SET is_off = TRUE, clock_in = NULL, clock_out = NULL",
+                    (user.id, today)
+                )
+                conn.commit()
+                update.message.reply_text(f"📅 Marked {today} as off day.")
+        finally:
+            release_db_connection(conn)
+    except Exception as e:
+        logger.error(f"Error in offday: {str(e)}")
+        update.message.reply_text("❌ An error occurred while marking off day. Please try again.")
 
 def balance(update, context):
     if update.effective_user.id not in ADMIN_IDS:
