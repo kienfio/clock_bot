@@ -1,6 +1,6 @@
 from flask import Flask, request
 from telegram import (
-    Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+    Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
     Dispatcher, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackQueryHandler
@@ -39,9 +39,10 @@ DEFAULT_HOURLY_RATE = float(os.getenv("DEFAULT_HOURLY_RATE", "20.00"))
 DEFAULT_MONTHLY_SALARY = float(os.getenv("DEFAULT_MONTHLY_SALARY", "3500.00"))
 WORKING_DAYS_PER_MONTH = int(os.getenv("WORKING_DAYS_PER_MONTH", "22"))
 WORKING_HOURS_PER_DAY = int(os.getenv("WORKING_HOURS_PER_DAY", "8"))
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')  # 添加 Google API Key
 
-# 修改：使用 UTC 作为默认时区，允许用户设置自己的时区
-DEFAULT_TIMEZONE = os.getenv('DEFAULT_TIMEZONE', 'UTC')
+# 修改：使用 UTC 作为默认时区
+DEFAULT_TIMEZONE = 'UTC'
 
 # === 日志设置 ===
 logging.basicConfig(
@@ -475,6 +476,59 @@ def generate_driver_pdf(driver_id, driver_name, bot, output_path):
     doc.build(elements)
     return output_path
 
+# === 添加位置识别功能 ===
+def get_timezone_from_location(latitude, longitude):
+    """根据经纬度获取时区"""
+    try:
+        timestamp = int(time.time())
+        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={GOOGLE_API_KEY}"
+        response = requests.get(url)
+        data = response.json()
+        
+        if data['status'] == 'OK':
+            return data['timeZoneId']
+        else:
+            logger.error(f"Error getting timezone: {data}")
+            return DEFAULT_TIMEZONE
+    except Exception as e:
+        logger.error(f"Error in get_timezone_from_location: {e}")
+        return DEFAULT_TIMEZONE
+
+def update_user_timezone(user_id, latitude, longitude):
+    """更新用户时区"""
+    timezone = get_timezone_from_location(latitude, longitude)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE drivers SET timezone = %s WHERE user_id = %s",
+                (timezone, user_id)
+            )
+            conn.commit()
+        return timezone
+    except Exception as e:
+        logger.error(f"Error updating user timezone: {e}")
+        return DEFAULT_TIMEZONE
+    finally:
+        release_db_connection(conn)
+
+def handle_location(update, context):
+    """处理用户发送的位置信息"""
+    try:
+        user = update.effective_user
+        location = update.message.location
+        
+        # 更新用户时区
+        timezone = update_user_timezone(user.id, location.latitude, location.longitude)
+        
+        update.message.reply_text(
+            f"✅ Your location has been received. Your timezone is set to: {timezone}\n"
+            "Your time will be automatically adjusted based on this timezone."
+        )
+    except Exception as e:
+        logger.error(f"Error in handle_location: {e}")
+        update.message.reply_text("❌ Failed to process your location. Please try again later.")
+
 # === 命令处理函数 ===
 def start(update, context):
     user = update.effective_user
@@ -484,15 +538,19 @@ def start(update, context):
         first_name=user.first_name
     )
     
+    # 创建位置共享按钮的键盘
+    keyboard = KeyboardButton(text="Share Location 📍", request_location=True)
+    reply_markup = ReplyKeyboardMarkup([[keyboard]], one_time_keyboard=True)
+    
     msg = (
         f"👋 Hello {user.first_name}!\n"
         "Welcome to Driver ClockIn Bot.\n\n"
+        "🌍 Please share your location to set your timezone automatically.\n\n"
         "Available Commands:\n"
         "🕑 /clockin\n"
         "🏁 /clockout\n"
         "📅 /offday\n"
-        "💸 /claim\n"
-        "🌍 /timezone - Set your timezone"
+        "💸 /claim"
     )
     if user.id in ADMIN_IDS:
         msg += (
@@ -506,7 +564,7 @@ def start(update, context):
             "🟢 /paid"
         )
 
-    update.message.reply_text(msg)
+    update.message.reply_text(msg, reply_markup=reply_markup)
 
 def clockin(update, context):
     try:
@@ -1278,44 +1336,6 @@ def get_current_date_for_user(user_id):
     """获取用户所在时区的当前日期"""
     return get_current_time_for_user(user_id).date()
 
-# === 添加时区设置命令 ===
-def set_timezone(update, context):
-    """设置用户时区"""
-    try:
-        if len(context.args) != 1:
-            update.message.reply_text(
-                "Please provide a valid timezone.\n"
-                "Example: /timezone Asia/Tokyo"
-            )
-            return
-
-        timezone_name = context.args[0]
-        try:
-            # 验证时区是否有效
-            pytz.timezone(timezone_name)
-        except pytz.exceptions.UnknownTimeZoneError:
-            update.message.reply_text(
-                "❌ Invalid timezone. Please use a valid timezone name.\n"
-                "Example: Asia/Tokyo, America/New_York, Europe/London"
-            )
-            return
-
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE drivers SET timezone = %s WHERE user_id = %s",
-                    (timezone_name, update.effective_user.id)
-                )
-                conn.commit()
-        finally:
-            release_db_connection(conn)
-
-        update.message.reply_text(f"✅ Timezone set to {timezone_name}")
-    except Exception as e:
-        logger.error(f"Error setting timezone: {e}")
-        update.message.reply_text("❌ An error occurred while setting timezone")
-
 # === 更新 init_bot 函数 ===
 def init_bot():
     """初始化 Telegram Bot 和 Dispatcher"""
@@ -1331,19 +1351,10 @@ def init_bot():
     dispatcher.add_handler(CommandHandler("check", check))
     dispatcher.add_handler(CommandHandler("viewclaims", viewclaims))
     dispatcher.add_handler(CommandHandler("PDF", pdf_start))
-    dispatcher.add_handler(CommandHandler("timezone", set_timezone))  # 新增时区设置命令
     dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r'^all|\d+$'))
-
-    # 确保 paid 命令处理器被正确注册
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("paid", paid_start)],
-        states={
-            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
-            PAID_START_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_start_date)],
-            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
+    
+    # 添加位置处理器
+    dispatcher.add_handler(MessageHandler(Filters.location, handle_location))
 
     # 其他对话处理器
     dispatcher.add_handler(ConversationHandler(
