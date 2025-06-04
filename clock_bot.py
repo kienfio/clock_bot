@@ -3,7 +3,7 @@ from telegram import (
     Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
-    Dispatcher, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackQueryHandler, CallbackContext
+    Dispatcher, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackQueryHandler
 )
 import datetime
 import pytz
@@ -25,8 +25,6 @@ from dotenv import load_dotenv
 from pathlib import Path
 import time
 import atexit
-updater.start_polling()
-updater.idle()
 
 # === 初始化设置 ===
 app = Flask(__name__)
@@ -521,9 +519,15 @@ def generate_driver_pdf(driver_id, driver_name, bot, output_path):
 def get_timezone_from_location(latitude, longitude):
     """根据经纬度获取时区"""
     try:
+        # 从环境变量获取API密钥
+        api_key = os.getenv('GOOGLE_API_KEY')
+        if not api_key:
+            logger.error("GOOGLE_API_KEY not set in environment variables")
+            return DEFAULT_TIMEZONE
+            
         timestamp = int(time.time())
-        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={GOOGLE_API_KEY}"
-        response = requests.get(url)
+        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={api_key}"
+        response = requests.get(url, timeout=5)
         data = response.json()
         
         if data['status'] == 'OK':
@@ -687,10 +691,46 @@ def clockin(update, context):
     """处理打卡命令"""
     try:
         user = update.effective_user
-        now = get_current_time_for_user(user.id)
-        today = now.date()
-        clock_time = now.astimezone(pytz.UTC)
-        time_str = format_local_time(now)
+        message = update.message
+        now_utc = datetime.datetime.now(pytz.UTC)
+        
+        # 获取用户当前时区
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT timezone FROM drivers WHERE user_id = %s", (user.id,))
+                result = cur.fetchone()
+                current_timezone = result[0] if result else DEFAULT_TIMEZONE
+        finally:
+            release_db_connection(conn)
+
+        # 如果消息包含位置信息，更新用户时区
+        if message.location:
+            lat = message.location.latitude
+            lon = message.location.longitude
+            new_timezone = get_timezone_from_location(lat, lon)
+            
+            # 更新用户时区
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE drivers SET timezone = %s WHERE user_id = %s",
+                        (new_timezone, user.id)
+                    )
+                    conn.commit()
+            finally:
+                release_db_connection(conn)
+                
+            current_timezone = new_timezone
+            location_info = f"\n📍 时区自动识别：{new_timezone}"
+        else:
+            location_info = f"\n⚠️ 使用已存储时区：{current_timezone}"
+
+        # 转换为用户时区的时间
+        user_tz = pytz.timezone(current_timezone)
+        now_local = now_utc.astimezone(user_tz)
+        today = now_local.date()
         
         # 保存打卡记录
         conn = get_db_connection()
@@ -705,32 +745,33 @@ def clockin(update, context):
                     # 更新记录
                     cur.execute(
                         "UPDATE clock_logs SET clock_in = %s, is_off = FALSE WHERE user_id = %s AND date = %s",
-                        (clock_time, user.id, today)
+                        (now_utc, user.id, today)
                     )
                 else:
                     # 插入新记录
                     cur.execute(
                         "INSERT INTO clock_logs (user_id, date, clock_in) VALUES (%s, %s, %s)",
-                        (user.id, today, clock_time)
+                        (user.id, today, now_utc)
                     )
                 conn.commit()
         finally:
             release_db_connection(conn)
 
-        # 先发送打卡成功消息
-        update.message.reply_text(f"✅ Clocked in at {time_str}")
+        # 发送打卡成功消息
+        time_str = now_local.strftime("%Y-%m-%d %H:%M:%S")
+        update.message.reply_text(f"✅ 打卡成功：{time_str}{location_info}")
         
-        # 保存状态并请求位置
-        context.user_data['clockin_time'] = time_str
-        context.user_data['location_pending'] = True
-        
-        # 请求位置
-        location_button = KeyboardButton("📍 Share Location", request_location=True)
-        reply_markup = ReplyKeyboardMarkup([[location_button]], resize_keyboard=True, one_time_keyboard=True)
-        update.message.reply_text(
-            "Please share your location for address verification:",
-            reply_markup=reply_markup
-        )
+        # 请求位置（如果没有提供）
+        if not message.location:
+            location_button = KeyboardButton("📍 Share Location", request_location=True)
+            reply_markup = ReplyKeyboardMarkup([[location_button]], resize_keyboard=True, one_time_keyboard=True)
+            update.message.reply_text(
+                "Please share your location for timezone verification:",
+                reply_markup=reply_markup
+            )
+            context.user_data['location_pending'] = True
+            context.user_data['clockin_time'] = time_str
+            
     except Exception as e:
         logger.error(f"Error in clockin: {str(e)}")
         update.message.reply_text("❌ An error occurred while clocking in. Please try again.")
@@ -1501,12 +1542,4 @@ def get_address_from_location(latitude, longitude):
             return "Address not available"
     except Exception as e:
         logger.error(f"Error in get_address_from_location: {e}")
-        return "Address lookup failed" 
-
-def test_location(update: Update, context: CallbackContext):
-    button = KeyboardButton("📍 Share Location", request_location=True)
-    reply_markup = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
-    update.message.reply_text("Test: Please share your location:", reply_markup=reply_markup)
-
-# 添加 handler
-dispatcher.add_handler(CommandHandler("testloc", test_location))
+        return "Address lookup failed"
