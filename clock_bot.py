@@ -68,6 +68,9 @@ CLAIM_PROOF = 3
 PAID_SELECT_DRIVER = 0
 PAID_START_DATE = 1
 PAID_END_DATE = 2
+VIEWCLAIMS_SELECT_USER = 10
+VIEWCLOCKING_SELECT_USER = 12
+CHECKSTATE_SELECT_USER = 11
 
 # === 数据库连接池 ===
 db_pool = None
@@ -436,31 +439,9 @@ def init_bot():
     ))
     dispatcher.add_handler(CommandHandler("clockout", clockout))
     dispatcher.add_handler(CommandHandler("offday", offday))
-    dispatcher.add_handler(CommandHandler("balance", balance))
-    dispatcher.add_handler(CommandHandler("check", check))
-    dispatcher.add_handler(CommandHandler("viewclaims", viewclaims))
-    dispatcher.add_handler(CommandHandler("PDF", pdf_start))
-    dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r'^all|\d+$'))
-
-    # 注册对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("salary", salary_start)],
-        states={
-            SALARY_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, salary_select_driver)],
-            SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, salary_enter_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("topup", topup_start)],
-        states={
-            TOPUP_USER: [MessageHandler(Filters.text & ~Filters.command, topup_user)],
-            TOPUP_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, topup_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
+    dispatcher.add_handler(CommandHandler("checkstate", checkstate_start))
+    
+    # 注册报销对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("claim", claim_start)],
         states={
@@ -470,22 +451,65 @@ def init_bot():
             CLAIM_PROOF: [MessageHandler(Filters.photo, claim_proof)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
     ))
-
+    
+    # 注册查看报销记录对话处理器
     dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("paid", paid_start)],
+        entry_points=[CommandHandler("viewclaims", viewclaims_start)],
         states={
-            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
-            PAID_START_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_start_date)],
-            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)],
+            VIEWCLAIMS_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_user)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
     ))
-
+    
+    # 注册查看状态对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("checkstate", checkstate_start)],
+        states={
+            CHECKSTATE_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, checkstate_select_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 注册查看打卡记录对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("viewclocking", viewclocking_start)],
+        states={
+            VIEWCLOCKING_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclocking_select_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 注册充值对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("topup", topup_start)],
+        states={
+            TOPUP_USER: [MessageHandler(Filters.text & ~Filters.command, topup_user)],
+            TOPUP_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, topup_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 注册设置工资对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("salary", salary_start)],
+        states={
+            SALARY_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, salary_select_driver)],
+            SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, salary_enter_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
     # 注册错误处理器
     dispatcher.add_error_handler(error_handler)
     
-    logger.info("Bot handlers initialized successfully") 
+    logger.info("Bot handlers initialized successfully")
 
 def start(update, context):
     """处理 /start 命令"""
@@ -944,6 +968,149 @@ def pdf_button_callback(update, context):
     # Implementation of pdf_button_callback function
     pass
 
+def viewclaims_start(update, context):
+    """开始查看报销记录流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    return show_workers_page(update, context, page=1, command="viewclaims")
+
+def show_workers_page(update, context, page=1, command=""):
+    """显示工人列表的分页"""
+    items_per_page = 5
+    offset = (page - 1) * items_per_page
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 获取总数
+            cur.execute("SELECT COUNT(*) FROM drivers")
+            total_workers = cur.fetchone()[0]
+            
+            # 获取当前页的工人
+            cur.execute(
+                """SELECT user_id, first_name 
+                   FROM drivers 
+                   ORDER BY first_name 
+                   LIMIT %s OFFSET %s""",
+                (items_per_page, offset)
+            )
+            workers = cur.fetchall()
+            
+            if not workers:
+                update.message.reply_text("No workers found.")
+                return ConversationHandler.END
+            
+            # 创建键盘按钮
+            keyboard = []
+            for worker in workers:
+                user_id, name = worker
+                keyboard.append([f"{user_id} - {name}"])
+            
+            # 添加导航按钮
+            nav_buttons = []
+            if page > 1:
+                nav_buttons.append(f"◀️ Previous")
+            if (page * items_per_page) < total_workers:
+                nav_buttons.append(f"Next ▶️")
+            if nav_buttons:
+                keyboard.append(nav_buttons)
+            
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
+            # 保存当前页码和命令到上下文
+            context.user_data['current_page'] = page
+            context.user_data['current_command'] = command
+            
+            update.message.reply_text(
+                f"Select a worker (Page {page}):",
+                reply_markup=reply_markup
+            )
+            
+            if command == "viewclaims":
+                return VIEWCLAIMS_SELECT_USER
+            elif command == "checkstate":
+                return CHECKSTATE_SELECT_USER
+            elif command == "viewclocking":
+                return VIEWCLOCKING_SELECT_USER
+            return ConversationHandler.END
+            
+    except Exception as e:
+        logger.error(f"Error in show_workers_page: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
+
+def handle_page_navigation(update, context):
+    """处理分页导航"""
+    text = update.message.text
+    current_page = context.user_data.get('current_page', 1)
+    command = context.user_data.get('current_command', '')
+    
+    if text == "◀️ Previous":
+        return show_workers_page(update, context, page=current_page-1, command=command)
+    elif text == "Next ▶️":
+        return show_workers_page(update, context, page=current_page+1, command=command)
+    return None
+
+def viewclaims_select_user(update, context):
+    """选择要查看报销记录的用户"""
+    # 检查是否是导航命令
+    nav_result = handle_page_navigation(update, context)
+    if nav_result is not None:
+        return nav_result
+        
+    try:
+        user_id = int(update.message.text.split()[0])
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT type, amount, date, status 
+                       FROM claims 
+                       WHERE user_id = %s 
+                       ORDER BY date DESC 
+                       LIMIT 5""",
+                    (user_id,)
+                )
+                claims = cur.fetchall()
+                
+                if not claims:
+                    update.message.reply_text(
+                        "📝 No claims found.",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
+                    return ConversationHandler.END
+                
+                message = ["📋 Recent Claims:"]
+                for claim in claims:
+                    claim_type, amount, date, status = claim
+                    message.append(
+                        f"\n{date.strftime('%Y-%m-%d')}"
+                        f"\nType: {claim_type}"
+                        f"\nAmount: RM {amount:.2f}"
+                        f"\nStatus: {status}"
+                        f"\n{'-'*20}"
+                    )
+                
+                update.message.reply_text(
+                    "".join(message),
+                    reply_markup=ReplyKeyboardRemove()
+                )
+        finally:
+            release_db_connection(conn)
+        
+        return ConversationHandler.END
+    except (ValueError, IndexError):
+        update.message.reply_text(
+            "❌ Please select a valid worker.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
 def viewclaims(update, context):
     """查看报销记录"""
     user = update.effective_user
@@ -1064,4 +1231,172 @@ def get_address_from_location(latitude, longitude):
             return "Address not available"
     except Exception as e:
         logger.error(f"Error in get_address_from_location: {str(e)}")
-        return "Address lookup failed" 
+        return "Address lookup failed"
+
+def checkstate_start(update, context):
+    """开始查看状态流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    return show_workers_page(update, context, page=1, command="checkstate")
+
+def checkstate_select_user(update, context):
+    """选择要查看状态的用户"""
+    # 检查是否是导航命令
+    nav_result = handle_page_navigation(update, context)
+    if nav_result is not None:
+        return nav_result
+        
+    try:
+        user_id = int(update.message.text.split()[0])
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 获取基本信息
+                cur.execute(
+                    """SELECT d.monthly_salary, d.total_hours,
+                          COALESCE(SUM(c.amount) FILTER (WHERE c.status = 'approved'), 0) as approved_claims,
+                          COALESCE(SUM(c.amount) FILTER (WHERE c.status = 'pending'), 0) as pending_claims
+                       FROM drivers d
+                       LEFT JOIN claims c ON d.user_id = c.user_id
+                       WHERE d.user_id = %s
+                       GROUP BY d.user_id, d.monthly_salary, d.total_hours""",
+                    (user_id,)
+                )
+                result = cur.fetchone()
+                
+                if not result:
+                    update.message.reply_text(
+                        "❌ Worker not found.",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
+                    return ConversationHandler.END
+                
+                monthly_salary, total_hours, approved_claims, pending_claims = result
+                
+                # 获取本月工作天数
+                cur.execute(
+                    """SELECT COUNT(DISTINCT date) 
+                       FROM clock_logs 
+                       WHERE user_id = %s 
+                       AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                       AND is_off = FALSE""",
+                    (user_id,)
+                )
+                work_days = cur.fetchone()[0] or 0
+                
+                message = [
+                    "📊 Worker Status\n",
+                    f"Monthly Salary: RM {monthly_salary:.2f}",
+                    f"Total Work Hours: {format_duration(total_hours)}",
+                    f"This Month Work Days: {work_days} days",
+                    f"Approved Claims: RM {approved_claims:.2f}",
+                    f"Pending Claims: RM {pending_claims:.2f}"
+                ]
+                
+                update.message.reply_text(
+                    "\n".join(message),
+                    reply_markup=ReplyKeyboardRemove()
+                )
+        finally:
+            release_db_connection(conn)
+        
+        return ConversationHandler.END
+    except (ValueError, IndexError):
+        update.message.reply_text(
+            "❌ Please select a valid worker.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+
+def viewclocking_start(update, context):
+    """开始查看打卡记录流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    return show_workers_page(update, context, page=1, command="viewclocking")
+
+def viewclocking_select_user(update, context):
+    """选择要查看打卡记录的用户"""
+    # 检查是否是导航命令
+    nav_result = handle_page_navigation(update, context)
+    if nav_result is not None:
+        return nav_result
+        
+    try:
+        user_id = int(update.message.text.split()[0])
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 获取本月打卡记录
+                cur.execute(
+                    """SELECT date, clock_in, clock_out, is_off,
+                          CASE 
+                              WHEN clock_in = 'OFF' THEN 0
+                              WHEN clock_out IS NULL THEN 0
+                              ELSE EXTRACT(EPOCH FROM (
+                                  clock_out::timestamp - clock_in::timestamp
+                              ))/3600
+                          END as hours_worked
+                       FROM clock_logs 
+                       WHERE user_id = %s 
+                       AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                       ORDER BY date DESC""",
+                    (user_id,)
+                )
+                logs = cur.fetchall()
+                
+                if not logs:
+                    update.message.reply_text(
+                        "📝 No clock records found this month.",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
+                    return ConversationHandler.END
+                
+                # 计算统计信息
+                total_days = len(logs)
+                work_days = len([log for log in logs if not log[3]])  # not is_off
+                off_days = len([log for log in logs if log[3]])  # is_off
+                total_hours = sum(log[4] for log in logs)
+                
+                message = [
+                    "📊 Clock Records Summary\n",
+                    f"Total Days: {total_days}",
+                    f"Work Days: {work_days}",
+                    f"Off Days: {off_days}",
+                    f"Total Hours: {format_duration(total_hours)}\n",
+                    "Recent Records:"
+                ]
+                
+                # 添加最近的记录
+                for log in logs[:5]:  # 只显示最近5条记录
+                    date, clock_in, clock_out, is_off, hours = log
+                    if is_off:
+                        message.append(f"\n{date}: Off Day")
+                    else:
+                        message.append(
+                            f"\n{date}:"
+                            f"\nIn: {clock_in or 'Not clocked in'}"
+                            f"\nOut: {clock_out or 'Not clocked out'}"
+                            f"\nHours: {format_duration(hours)}"
+                        )
+                    message.append("-" * 20)
+                
+                update.message.reply_text(
+                    "\n".join(message),
+                    reply_markup=ReplyKeyboardRemove()
+                )
+        finally:
+            release_db_connection(conn)
+        
+        return ConversationHandler.END
+    except (ValueError, IndexError):
+        update.message.reply_text(
+            "❌ Please select a valid worker.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END 
