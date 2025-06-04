@@ -25,6 +25,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 import time
 import atexit
+updater.start_polling()
+updater.idle()
 
 # === 初始化设置 ===
 app = Flask(__name__)
