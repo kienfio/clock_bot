@@ -376,45 +376,18 @@ def handle_location(update, context):
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 检查是否已有记录
+                # 直接插入或更新打卡记录，不检查之前的记录
                 cur.execute(
-                    "SELECT clock_in, clock_out FROM clock_logs WHERE user_id = %s AND date = %s",
-                    (user.id, today)
+                    """INSERT INTO clock_logs 
+                       (user_id, date, clock_in, location_address) 
+                       VALUES (%s, %s, %s, %s)
+                       ON CONFLICT (user_id, date) 
+                       DO UPDATE SET 
+                       clock_in = %s,
+                       location_address = %s,
+                       is_off = FALSE""",
+                    (user.id, today, clock_time, address, clock_time, address)
                 )
-                log = cur.fetchone()
-                
-                if log:
-                    clock_in = log[0]
-                    clock_out = log[1]
-                    
-                    if clock_in and clock_in != "OFF":
-                        if not clock_out:
-                            update.message.reply_text(
-                                "❌ You have already clocked in today.",
-                                reply_markup=ReplyKeyboardRemove()
-                            )
-                            return ConversationHandler.END
-                        update.message.reply_text(
-                            "❌ You have already completed your shift today.",
-                            reply_markup=ReplyKeyboardRemove()
-                        )
-                        return ConversationHandler.END
-                
-                # 更新或插入打卡记录
-                if log:
-                    cur.execute(
-                        """UPDATE clock_logs 
-                           SET clock_in = %s, is_off = FALSE, location_address = %s 
-                           WHERE user_id = %s AND date = %s""",
-                        (clock_time, address, user.id, today)
-                    )
-                else:
-                    cur.execute(
-                        """INSERT INTO clock_logs 
-                           (user_id, date, clock_in, location_address) 
-                           VALUES (%s, %s, %s, %s)""",
-                        (user.id, today, clock_time, address)
-                    )
                 conn.commit()
                 
                 # 发送成功消息
@@ -534,7 +507,7 @@ def start(update, context):
                 conn.commit()
                 welcome_msg = (
                     f"👋 Hello {user.first_name}!\n"
-                    "Welcome to Driver ClockIn Bot.\n\n"
+                    "Welcome to Worker ClockIn Bot.\n\n"
                     "Available Commands:\n"
                     "🕑 /clockin\n"
                     "🏁 /clockout\n"
@@ -552,7 +525,7 @@ def start(update, context):
             else:
                 welcome_msg = (
                     f"👋 Hello {user.first_name}!\n"
-                    "Welcome to Driver ClockIn Bot.\n\n"
+                    "Welcome to Worker ClockIn Bot.\n\n"
                     "Available Commands:\n"
                     "🕑 /clockin\n"
                     "🏁 /clockout\n"
