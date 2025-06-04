@@ -235,7 +235,7 @@ def init_db():
                     username TEXT,
                     first_name TEXT,
                     balance FLOAT DEFAULT 0.0,
-                    monthly_salary FLOAT DEFAULT 3500.0,
+                    monthly_salary FLOAT DEFAULT 0.0,
                     total_hours FLOAT DEFAULT 0.0,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
@@ -517,6 +517,10 @@ def init_bot():
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
     
+    # PDF 生成命令和回调
+    dispatcher.add_handler(CommandHandler("PDF", pdf_start))
+    dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r"^pdf_"))
+    
     # 注册简单命令处理器
     dispatcher.add_handler(CommandHandler("clockout", clockout))
     dispatcher.add_handler(CommandHandler("offday", offday))
@@ -537,10 +541,10 @@ def start(update, context):
             driver = cur.fetchone()
             
             if not driver:
-                # 创建新用户
+                # 创建新用户，确保工资为0
                 cur.execute(
-                    """INSERT INTO drivers (user_id, username, first_name) 
-                       VALUES (%s, %s, %s)""",
+                    """INSERT INTO drivers (user_id, username, first_name, monthly_salary) 
+                       VALUES (%s, %s, %s, 0.0)""",
                     (user.id, user.username, user.first_name)
                 )
                 conn.commit()
@@ -878,12 +882,308 @@ def paid_end_date(update, context):
     pass
 
 def pdf_start(update, context):
-    # Implementation of pdf_start function
-    pass
+    """开始生成PDF报告流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    # 创建内联键盘，提供不同类型的报告选项
+    keyboard = [
+        [InlineKeyboardButton("📊 工作时间报告", callback_data="pdf_work_hours")],
+        [InlineKeyboardButton("💰 薪资报告", callback_data="pdf_salary")],
+        [InlineKeyboardButton("🧾 全部数据报告", callback_data="pdf_all")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    update.message.reply_text(
+        "请选择要生成的报告类型:",
+        reply_markup=reply_markup
+    )
+    return ConversationHandler.END
 
 def pdf_button_callback(update, context):
-    # Implementation of pdf_button_callback function
-    pass
+    """处理PDF报告选择按钮回调"""
+    query = update.callback_query
+    query.answer()
+    
+    report_type = query.data.replace("pdf_", "")
+    user = query.from_user
+    
+    if user.id not in ADMIN_IDS:
+        query.edit_message_text("❌ 只有管理员才能生成报告。")
+        return
+    
+    query.edit_message_text("🔄 正在生成报告，请稍候...")
+    
+    try:
+        # 获取本月的第一天和最后一天
+        today = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
+        first_day = today.replace(day=1)
+        next_month = today.replace(day=28) + datetime.timedelta(days=4)
+        last_day = (next_month - datetime.timedelta(days=next_month.day)).date()
+        
+        conn = get_db_connection()
+        try:
+            # 生成PDF文件
+            pdf_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+            pdf_path = pdf_file.name
+            pdf_file.close()
+            
+            doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+            elements = []
+            
+            # 添加标题
+            styles = getSampleStyleSheet()
+            title_style = styles["Title"]
+            
+            if report_type == "work_hours":
+                title = "工作时间报告"
+                elements.append(Paragraph(title, title_style))
+                elements.append(Spacer(1, 20))
+                
+                # 获取所有工人的工作时间数据
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT d.user_id, d.first_name, d.total_hours
+                           FROM drivers d
+                           ORDER BY d.first_name"""
+                    )
+                    workers = cur.fetchall()
+                    
+                    # 为每个工人获取本月的工作时间
+                    data = [["工人姓名", "总工作时间", "本月工作时间", "本月工作天数"]]
+                    
+                    for worker in workers:
+                        user_id, name, total_hours = worker
+                        
+                        # 获取本月工作天数
+                        cur.execute(
+                            """SELECT COUNT(DISTINCT date) 
+                               FROM clock_logs 
+                               WHERE user_id = %s 
+                               AND date BETWEEN %s AND %s
+                               AND is_off = FALSE""",
+                            (user_id, first_day, last_day)
+                        )
+                        work_days = cur.fetchone()[0] or 0
+                        
+                        # 计算本月工作时间
+                        month_hours = 0
+                        cur.execute(
+                            """SELECT date, clock_in, clock_out, is_off
+                               FROM clock_logs 
+                               WHERE user_id = %s 
+                               AND date BETWEEN %s AND %s""",
+                            (user_id, first_day, last_day)
+                        )
+                        logs = cur.fetchall()
+                        
+                        for log in logs:
+                            _, clock_in, clock_out, is_off = log
+                            if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
+                                try:
+                                    if isinstance(clock_in, str) and isinstance(clock_out, str):
+                                        in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
+                                        out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
+                                        hours = (out_time - in_time).total_seconds() / 3600
+                                        if hours > 0:
+                                            month_hours += hours
+                                except (ValueError, TypeError):
+                                    pass
+                        
+                        data.append([
+                            name, 
+                            f"{format_duration(total_hours)}", 
+                            f"{format_duration(month_hours)}", 
+                            f"{work_days}"
+                        ])
+                    
+                    # 创建表格
+                    table = Table(data)
+                    table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ]))
+                    elements.append(table)
+            
+            elif report_type == "salary":
+                title = "薪资报告"
+                elements.append(Paragraph(title, title_style))
+                elements.append(Spacer(1, 20))
+                
+                # 获取所有工人的薪资数据
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT d.user_id, d.first_name, d.monthly_salary, d.balance
+                           FROM drivers d
+                           ORDER BY d.first_name"""
+                    )
+                    workers = cur.fetchall()
+                    
+                    # 为每个工人获取本月的薪资信息
+                    data = [["工人姓名", "月薪 (RM)", "当前余额 (RM)", "本月报销 (RM)"]]
+                    
+                    for worker in workers:
+                        user_id, name, monthly_salary, balance = worker
+                        
+                        # 获取本月报销金额
+                        cur.execute(
+                            """SELECT COALESCE(SUM(amount), 0)
+                               FROM claims 
+                               WHERE user_id = %s 
+                               AND date BETWEEN %s AND %s""",
+                            (user_id, first_day, last_day)
+                        )
+                        claims_amount = cur.fetchone()[0] or 0
+                        
+                        data.append([
+                            name, 
+                            f"{monthly_salary:.2f}", 
+                            f"{balance:.2f}", 
+                            f"{claims_amount:.2f}"
+                        ])
+                    
+                    # 创建表格
+                    table = Table(data)
+                    table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ]))
+                    elements.append(table)
+            
+            else:  # all
+                title = "全部数据报告"
+                elements.append(Paragraph(title, title_style))
+                elements.append(Spacer(1, 20))
+                
+                # 工人基本信息
+                elements.append(Paragraph("工人基本信息", styles["Heading2"]))
+                elements.append(Spacer(1, 10))
+                
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT d.user_id, d.first_name, d.monthly_salary, d.total_hours, d.balance
+                           FROM drivers d
+                           ORDER BY d.first_name"""
+                    )
+                    workers = cur.fetchall()
+                    
+                    data = [["工人姓名", "月薪 (RM)", "总工作时间", "当前余额 (RM)"]]
+                    for worker in workers:
+                        user_id, name, monthly_salary, total_hours, balance = worker
+                        data.append([
+                            name, 
+                            f"{monthly_salary:.2f}", 
+                            f"{format_duration(total_hours)}", 
+                            f"{balance:.2f}"
+                        ])
+                    
+                    table = Table(data)
+                    table.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ]))
+                    elements.append(table)
+                    elements.append(Spacer(1, 20))
+                    
+                    # 本月打卡记录
+                    elements.append(Paragraph("本月打卡记录", styles["Heading2"]))
+                    elements.append(Spacer(1, 10))
+                    
+                    for worker in workers:
+                        user_id, name, _, _, _ = worker
+                        elements.append(Paragraph(f"工人: {name}", styles["Heading3"]))
+                        elements.append(Spacer(1, 5))
+                        
+                        cur.execute(
+                            """SELECT date, clock_in, clock_out, is_off
+                               FROM clock_logs 
+                               WHERE user_id = %s 
+                               AND date BETWEEN %s AND %s
+                               ORDER BY date DESC""",
+                            (user_id, first_day, last_day)
+                        )
+                        logs = cur.fetchall()
+                        
+                        if logs:
+                            log_data = [["日期", "上班时间", "下班时间", "休息日", "工作时长"]]
+                            
+                            for log in logs:
+                                date, clock_in, clock_out, is_off = log
+                                
+                                # 计算工作时长
+                                hours = 0
+                                if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
+                                    try:
+                                        if isinstance(clock_in, str) and isinstance(clock_out, str):
+                                            in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
+                                            out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
+                                            hours = (out_time - in_time).total_seconds() / 3600
+                                    except (ValueError, TypeError):
+                                        pass
+                                
+                                log_data.append([
+                                    date.strftime("%Y-%m-%d"),
+                                    "休息日" if is_off else (clock_in if clock_in else "未打卡"),
+                                    "休息日" if is_off else (clock_out if clock_out else "未打卡"),
+                                    "是" if is_off else "否",
+                                    format_duration(hours) if hours > 0 else "-"
+                                ])
+                            
+                            log_table = Table(log_data)
+                            log_table.setStyle(TableStyle([
+                                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+                                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                            ]))
+                            elements.append(log_table)
+                        else:
+                            elements.append(Paragraph("没有打卡记录", styles["Normal"]))
+                        
+                        elements.append(Spacer(1, 15))
+            
+            # 构建PDF
+            doc.build(elements)
+            
+            # 发送PDF文件
+            with open(pdf_path, 'rb') as f:
+                current_date = datetime.datetime.now().strftime("%Y%m%d")
+                bot.send_document(
+                    chat_id=user.id,
+                    document=f,
+                    filename=f"{report_type}_report_{current_date}.pdf",
+                    caption=f"📊 {title} - 生成于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                )
+            
+            # 删除临时文件
+            os.unlink(pdf_path)
+            
+            # 更新消息
+            query.edit_message_text(f"✅ {title}已生成并发送！")
+            
+        finally:
+            release_db_connection(conn)
+            
+    except Exception as e:
+        logger.error(f"Error generating PDF: {str(e)}")
+        query.edit_message_text("❌ 生成报告时出错。请稍后再试或联系管理员。")
 
 def viewclaims_start(update, context):
     """开始查看报销记录流程"""
