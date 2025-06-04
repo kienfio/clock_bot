@@ -2,6 +2,7 @@ import os
 import psycopg2
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import logging
+import requests
 
 # 设置日志
 logging.basicConfig(
@@ -9,6 +10,30 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# === 添加地址解析功能 ===
+def get_address_from_location(latitude, longitude):
+    """根据经纬度获取地址"""
+    try:
+        # 从环境变量获取API密钥
+        GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+        if not GOOGLE_API_KEY:
+            logger.error("GOOGLE_API_KEY not set in environment variables")
+            return "API key not available"
+            
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={latitude},{longitude}&key={GOOGLE_API_KEY}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['status'] == 'OK' and data['results']:
+            # 获取最精确的地址
+            return data['results'][0]['formatted_address']
+        else:
+            logger.error(f"Error getting address: {data}")
+            return "Address not available"
+    except Exception as e:
+        logger.error(f"Error in get_address_from_location: {e}")
+        return "Address lookup failed"
 
 def init_database():
     """初始化数据库和表结构"""
@@ -41,14 +66,14 @@ def init_database():
         """)
         logger.info("创建 drivers 表成功")
         
-        # 2. 打卡记录表
+        # 2. 打卡记录表 - 添加 location_address 字段
         cur.execute("""
         CREATE TABLE IF NOT EXISTS clock_logs (
             id SERIAL PRIMARY KEY,
             user_id BIGINT REFERENCES drivers(user_id),
             date DATE NOT NULL,
-            clock_in TIMESTAMP WITH TIME ZONE,
-            clock_out TIMESTAMP WITH TIME ZONE,
+            clock_in VARCHAR(30),
+            clock_out VARCHAR(30),
             is_off BOOLEAN DEFAULT FALSE,
             location_address TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -86,7 +111,6 @@ def init_database():
         logger.info("创建 claims 表成功")
         
         # 5. 创建索引
-        # 为常用查询创建索引以提高性能
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
         CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
