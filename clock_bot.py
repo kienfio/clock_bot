@@ -1329,30 +1329,35 @@ def checkstate_select_user(update, context):
                 work_stats = cur.fetchone() or (0, 0)
                 work_days, off_days = work_stats
                 
-                # 获取本月工作时长
+                # 获取本月工作时长 - 使用更安全的方法计算时间差
                 cur.execute(
-                    """SELECT SUM(
-                        CASE 
-                            WHEN is_off = TRUE THEN 0
-                            WHEN clock_out IS NULL OR clock_in IS NULL THEN 0
-                            WHEN clock_in = 'OFF' OR clock_out = 'OFF' THEN 0
-                            ELSE 
-                                EXTRACT(EPOCH FROM (
-                                    CASE WHEN clock_out ~ '^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$' AND 
-                                              clock_in ~ '^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$' 
-                                         THEN clock_out::timestamp - clock_in::timestamp
-                                         ELSE '0'::interval
-                                    END
-                                ))/3600
-                        END
-                    ) as month_hours
+                    """SELECT 
+                        date, 
+                        clock_in, 
+                        clock_out, 
+                        is_off
                     FROM clock_logs 
                     WHERE user_id = %s 
                     AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
                     (user_id,)
                 )
-                month_hours_result = cur.fetchone()
-                month_hours = month_hours_result[0] if month_hours_result and month_hours_result[0] else 0
+                logs = cur.fetchall()
+                
+                # 手动计算工作时长，避免SQL中的时间戳转换问题
+                month_hours = 0
+                for log in logs:
+                    date, clock_in, clock_out, is_off = log
+                    if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
+                        try:
+                            # 尝试解析时间戳
+                            if isinstance(clock_in, str) and isinstance(clock_out, str):
+                                in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
+                                out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
+                                hours = (out_time - in_time).total_seconds() / 3600
+                                if hours > 0:
+                                    month_hours += hours
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"Error parsing timestamps for date {date}: {e}")
                 
                 # 获取报销总额
                 cur.execute(
