@@ -59,8 +59,6 @@ dispatcher = None
 # === 状态常量 ===
 SALARY_SELECT_DRIVER = 0
 SALARY_ENTER_AMOUNT = 1
-TOPUP_USER = 0
-TOPUP_AMOUNT = 1
 CLAIM_TYPE = 0
 CLAIM_OTHER_TYPE = 1
 CLAIM_AMOUNT = 2
@@ -69,7 +67,6 @@ PAID_SELECT_DRIVER = 0
 PAID_START_DATE = 1
 PAID_END_DATE = 2
 VIEWCLAIMS_SELECT_USER = 10
-VIEWCLOCKING_SELECT_USER = 12
 CHECKSTATE_SELECT_USER = 11
 
 # === 数据库连接池 ===
@@ -477,17 +474,7 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 2. 查看打卡记录对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("viewclocking", viewclocking_start)],
-        states={
-            VIEWCLOCKING_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclocking_select_user)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    ))
-    
-    # 3. 查看报销记录对话处理器
+    # 2. 查看报销记录对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("viewclaims", viewclaims_start)],
         states={
@@ -497,7 +484,7 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 4. 报销对话处理器
+    # 3. 报销对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("claim", claim_start)],
         states={
@@ -510,18 +497,7 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 5. 充值对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("topup", topup_start)],
-        states={
-            TOPUP_USER: [MessageHandler(Filters.text & ~Filters.command, topup_user)],
-            TOPUP_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, topup_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    ))
-    
-    # 6. 设置工资对话处理器
+    # 4. 设置工资对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("salary", salary_start)],
         states={
@@ -532,7 +508,7 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 7. 打卡对话处理器
+    # 5. 打卡对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("clockin", clockin)],
         states={
@@ -578,9 +554,7 @@ def start(update, context):
                     "💸 /claim\n\n"
                     "🔐 Admin Commands:\n"
                     "📊 /checkstate\n"
-                    "📄 /viewclocking\n"
                     "🧾 /PDF\n"
-                    "💵 /topup\n"
                     "📷 /viewclaims\n"
                     "💰 /salary\n"
                     "🟢 /paid"
@@ -596,9 +570,7 @@ def start(update, context):
                     "💸 /claim\n\n"
                     "🔐 Admin Commands:\n"
                     "📊 /checkstate\n"
-                    "📄 /viewclocking\n"
                     "🧾 /PDF\n"
-                    "💵 /topup\n"
                     "📷 /viewclaims\n"
                     "💰 /salary\n"
                     "🟢 /paid"
@@ -794,100 +766,6 @@ def salary_enter_amount(update, context):
         update.message.reply_text("❌ Please enter a valid number.")
         return SALARY_ENTER_AMOUNT
 
-def topup_start(update, context):
-    """开始充值流程"""
-    user = update.effective_user
-    if user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ This command is only available for admins.")
-        return ConversationHandler.END
-    
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT user_id, first_name, balance FROM drivers")
-            drivers = cur.fetchall()
-            
-            if not drivers:
-                update.message.reply_text("No workers found.")
-                return ConversationHandler.END
-            
-            message = ["Select a worker to top up:"]
-            for driver in drivers:
-                user_id, name, balance = driver
-                message.append(f"\n{user_id} - {name} (Balance: RM {balance:.2f})")
-            
-            update.message.reply_text("\n".join(message))
-            return TOPUP_USER
-    except Exception as e:
-        logger.error(f"Error in topup_start: {str(e)}")
-        update.message.reply_text("❌ An error occurred. Please try again.")
-        return ConversationHandler.END
-    finally:
-        release_db_connection(conn)
-
-def topup_user(update, context):
-    """选择要充值的用户"""
-    try:
-        user_id = int(update.message.text.split()[0])
-        context.user_data['target_user_id'] = user_id
-        
-        update.message.reply_text(
-            "Please enter the top up amount (e.g., 100.00):"
-        )
-        return TOPUP_AMOUNT
-    except (ValueError, IndexError):
-        update.message.reply_text("❌ Please select a valid worker ID.")
-        return TOPUP_USER
-
-def topup_amount(update, context):
-    """处理充值金额"""
-    try:
-        amount = float(update.message.text)
-        if amount <= 0:
-            update.message.reply_text("❌ Amount must be greater than 0.")
-            return TOPUP_AMOUNT
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 更新余额
-                cur.execute(
-                    "UPDATE drivers SET balance = balance + %s WHERE user_id = %s",
-                    (amount, context.user_data['target_user_id'])
-                )
-                
-                # 记录充值
-                cur.execute(
-                    """INSERT INTO topups (user_id, amount, date, admin_id)
-                       VALUES (%s, %s, %s, %s)""",
-                    (context.user_data['target_user_id'],
-                     amount,
-                     datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date(),
-                     update.effective_user.id)
-                )
-                conn.commit()
-                
-                # 获取新余额
-                cur.execute(
-                    "SELECT balance FROM drivers WHERE user_id = %s",
-                    (context.user_data['target_user_id'],)
-                )
-                new_balance = cur.fetchone()[0]
-                
-                update.message.reply_text(
-                    f"✅ Top up successful!\n"
-                    f"Amount: RM {amount:.2f}\n"
-                    f"New Balance: RM {new_balance:.2f}"
-                )
-        finally:
-            release_db_connection(conn)
-        
-        context.user_data.clear()
-        return ConversationHandler.END
-    except ValueError:
-        update.message.reply_text("❌ Please enter a valid number.")
-        return TOPUP_AMOUNT
-
 def claim_start(update, context):
     """开始报销流程"""
     user = update.effective_user
@@ -1072,8 +950,6 @@ def show_workers_page(update, context, page=1, command=""):
                 return VIEWCLAIMS_SELECT_USER
             elif command == "checkstate":
                 return CHECKSTATE_SELECT_USER
-            elif command == "viewclocking":
-                return VIEWCLOCKING_SELECT_USER
             return ConversationHandler.END
             
     except Exception as e:
@@ -1405,103 +1281,6 @@ def checkstate_select_user(update, context):
         logger.error(f"Unexpected error in checkstate_select_user: {str(e)}")
         update.message.reply_text(
             "❌ An error occurred. Please try again or contact admin.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def viewclocking_start(update, context):
-    """开始查看打卡记录流程"""
-    user = update.effective_user
-    if user.id not in ADMIN_IDS:
-        update.message.reply_text("❌ This command is only available for admins.")
-        return ConversationHandler.END
-    
-    return show_workers_page(update, context, page=1, command="viewclocking")
-
-def viewclocking_select_user(update, context):
-    """选择要查看打卡记录的用户"""
-    # 检查是否是导航命令
-    nav_result = handle_page_navigation(update, context)
-    if nav_result is not None:
-        return nav_result
-        
-    try:
-        user_id = int(update.message.text.split()[0])
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 获取本月打卡记录
-                cur.execute(
-                    """SELECT date, clock_in, clock_out, is_off,
-                          CASE 
-                              WHEN is_off = TRUE THEN 0
-                              WHEN clock_out IS NULL OR clock_in IS NULL THEN 0
-                              ELSE 
-                                  CASE 
-                                      WHEN clock_in = 'OFF' OR clock_out = 'OFF' THEN 0
-                                      ELSE 
-                                          EXTRACT(EPOCH FROM (
-                                              clock_out::timestamp - clock_in::timestamp
-                                          ))/3600
-                                  END
-                          END as hours_worked
-                       FROM clock_logs 
-                       WHERE user_id = %s 
-                       AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
-                       ORDER BY date DESC""",
-                    (user_id,)
-                )
-                logs = cur.fetchall()
-                
-                if not logs:
-                    update.message.reply_text(
-                        "📝 No clock records found this month.",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
-                    return ConversationHandler.END
-                
-                # 计算统计信息
-                total_days = len(logs)
-                work_days = len([log for log in logs if not log[3]])  # not is_off
-                off_days = len([log for log in logs if log[3]])  # is_off
-                total_hours = sum(log[4] for log in logs)
-                
-                message = [
-                    "📊 Clock Records Summary\n",
-                    f"Total Days: {total_days}",
-                    f"Work Days: {work_days}",
-                    f"Off Days: {off_days}",
-                    f"Total Hours: {format_duration(total_hours)}\n",
-                    "Recent Records:"
-                ]
-                
-                # 添加最近的记录
-                for log in logs[:5]:  # 只显示最近5条记录
-                    date, clock_in, clock_out, is_off, hours = log
-                    if is_off:
-                        message.append(f"\n{date}: Off Day")
-                    else:
-                        in_time = "Not clocked in" if clock_in is None else clock_in
-                        out_time = "Not clocked out" if clock_out is None else clock_out
-                        message.append(
-                            f"\n{date}:"
-                            f"\nIn: {in_time}"
-                            f"\nOut: {out_time}"
-                            f"\nHours: {format_duration(hours)}"
-                        )
-                    message.append("-" * 20)
-                
-                update.message.reply_text(
-                    "\n".join(message),
-                    reply_markup=ReplyKeyboardRemove()
-                )
-        finally:
-            release_db_connection(conn)
-        
-        return ConversationHandler.END
-    except (ValueError, IndexError):
-        update.message.reply_text(
-            "❌ Please select a valid worker.",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END 
