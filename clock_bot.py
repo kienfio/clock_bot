@@ -74,18 +74,28 @@ db_pool = None
 def init_db():
     """初始化数据库和表结构"""
     global db_pool
+    
+    # 从环境变量获取数据库连接信息
+    DATABASE_URL = os.environ.get("DATABASE_URL")
+    
+    if not DATABASE_URL:
+        raise ValueError("需要设置 DATABASE_URL 环境变量")
+    
+    logger.info("开始初始化数据库...")
+    
     try:
+        # 创建连接池
         db_pool = psycopg2.pool.SimpleConnectionPool(
             minconn=1,
             maxconn=20,
-            dsn=os.environ.get("DATABASE_URL")
+            dsn=DATABASE_URL
         )
-        logger.info("Database connection pool created successfully")
+        logger.info("数据库连接池创建成功")
         
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 创建 drivers 表（添加 timezone 列）
+                # 1. 创建 drivers 表（添加 timezone 列）
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS drivers (
                     user_id BIGINT PRIMARY KEY,
@@ -98,6 +108,7 @@ def init_db():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
+                logger.info("创建 drivers 表成功")
                 
                 # 确保 timezone 列存在（兼容旧表结构）
                 cur.execute("""
@@ -112,8 +123,9 @@ def init_db():
                     END IF;
                 END $$;
                 """)
+                logger.info("确保 drivers 表存在 timezone 列")
                 
-                # 打卡记录表
+                # 2. 打卡记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS clock_logs (
                     id SERIAL PRIMARY KEY,
@@ -122,12 +134,14 @@ def init_db():
                     clock_in TIMESTAMP WITH TIME ZONE,
                     clock_out TIMESTAMP WITH TIME ZONE,
                     is_off BOOLEAN DEFAULT FALSE,
+                    location_address TEXT,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id, date)
                 )
                 """)
+                logger.info("创建 clock_logs 表成功")
                 
-                # 充值记录表
+                # 3. 充值记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS topups (
                     id SERIAL PRIMARY KEY,
@@ -138,8 +152,9 @@ def init_db():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
+                logger.info("创建 topups 表成功")
                 
-                # 报销记录表
+                # 4. 报销记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS claims (
                     id SERIAL PRIMARY KEY,
@@ -152,15 +167,26 @@ def init_db():
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
+                logger.info("创建 claims 表成功")
+                
+                # 5. 创建索引
+                cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
+                CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
+                CREATE INDEX IF NOT EXISTS idx_topups_user_date ON topups(user_id, date);
+                CREATE INDEX IF NOT EXISTS idx_drivers_timezone ON drivers(timezone);
+                """)
+                logger.info("创建索引成功")
+                
                 conn.commit()
-                logger.info("Database tables created/updated successfully")
+                logger.info("数据库初始化完成！")
         finally:
             release_db_connection(conn)
+            
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"数据库初始化失败: {str(e)}")
         raise
 
-# === 数据库工具函数 ===
 def get_db_connection():
     """获取数据库连接"""
     try:
@@ -170,7 +196,7 @@ def get_db_connection():
             cur.execute("SET TIME ZONE 'UTC';")
         return conn
     except psycopg2.pool.PoolError:
-        logger.error("Connection pool exhausted, waiting for available connection...")
+        logger.error("连接池已满，等待可用连接...")
         # 等待一会儿再试
         time.sleep(1)
         try:
@@ -180,7 +206,7 @@ def get_db_connection():
                 cur.execute("SET TIME ZONE 'UTC';")
             return conn
         except Exception as e:
-            logger.error(f"Failed to get database connection: {e}")
+            logger.error(f"获取数据库连接失败: {e}")
             raise
 
 def release_db_connection(conn):
@@ -493,9 +519,15 @@ def generate_driver_pdf(driver_id, driver_name, bot, output_path):
 def get_timezone_from_location(latitude, longitude):
     """根据经纬度获取时区"""
     try:
+        # 从环境变量获取API密钥
+        api_key = os.getenv('GOOGLE_API_KEY')
+        if not api_key:
+            logger.error("GOOGLE_API_KEY not set in environment variables")
+            return DEFAULT_TIMEZONE
+            
         timestamp = int(time.time())
-        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={GOOGLE_API_KEY}"
-        response = requests.get(url)
+        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={api_key}"
+        response = requests.get(url, timeout=5)
         data = response.json()
         
         if data['status'] == 'OK':
@@ -528,19 +560,100 @@ def update_user_timezone(user_id, latitude, longitude):
 def handle_location(update, context):
     """处理用户发送的位置信息"""
     try:
+        if not context.user_data.get('location_pending'):
+            return
+
         user = update.effective_user
         location = update.message.location
-        
-        # 更新用户时区
-        timezone = update_user_timezone(user.id, location.latitude, location.longitude)
-        
+        lat, lng = location.latitude, location.longitude
+        address = "Unknown"
+
+        try:
+            # 从环境变量获取API密钥
+            api_key = os.getenv('GOOGLE_API_KEY')
+            if not api_key:
+                logger.error("GOOGLE_API_KEY not set in environment variables")
+                address = "API key not available"
+            else:
+                resp = requests.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"latlng": f"{lat},{lng}", "key": api_key},
+                    timeout=5
+                )
+                data = resp.json()
+                if data.get("status") == "OK" and data.get("results"):
+                    address = data["results"][0]["formatted_address"]
+        except Exception as e:
+            logger.error(f"Error getting address: {e}")
+            address = "Location lookup failed"
+
+        # 更新打卡记录中的地址
+        today = get_current_date_for_user(user.id)
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE clock_logs SET location_address = %s WHERE user_id = %s AND date = %s",
+                    (address, user.id, today)
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+
+        # 显示带地址的打卡确认
+        time_str = context.user_data.get('clockin_time', 'N/A')
         update.message.reply_text(
-            f"✅ Your location has been received. Your timezone is set to: {timezone}\n"
-            "Your time will be automatically adjusted based on this timezone."
+            f"✅ Clocked in at {time_str}\n"
+            f"📍 Location: {address}",
+            reply_markup=ReplyKeyboardRemove()
         )
+
+        # 清理状态
+        context.user_data.pop('clockin_time', None)
+        context.user_data.pop('location_pending', None)
+
     except Exception as e:
         logger.error(f"Error in handle_location: {e}")
-        update.message.reply_text("❌ Failed to process your location. Please try again later.")
+        update.message.reply_text(
+            "❌ Failed to process your location. Please try again later.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+def handle_text_after_clockin(update, context):
+    """处理打卡后的文本消息（处理拒绝位置的情况）"""
+    try:
+        if not context.user_data.get('location_pending'):
+            return
+
+        user = update.effective_user
+        time_str = context.user_data.get('clockin_time', 'N/A')
+        
+        # 更新打卡记录为拒绝位置
+        today = get_current_date_for_user(user.id)
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE clock_logs SET location_address = 'refused' "
+                    "WHERE user_id = %s AND date = %s",
+                    (user.id, today)
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+        
+        # 显示拒绝位置的消息
+        update.message.reply_text(
+            f"✅ Clocked in at {time_str}\n"
+            "⚠️ Refused to share location",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # 清理状态
+        context.user_data.pop('clockin_time', None)
+        context.user_data.pop('location_pending', None)
+    except Exception as e:
+        logger.error(f"Error in handle_text_after_clockin: {e}")
 
 # === 命令处理函数 ===
 def start(update, context):
@@ -575,12 +688,51 @@ def start(update, context):
     update.message.reply_text(msg)
 
 def clockin(update, context):
+    """处理打卡命令"""
     try:
         user = update.effective_user
-        now = get_current_time_for_user(user.id)
-        today = now.date()
-        clock_time = now.astimezone(pytz.UTC)  # 转换为 UTC 时间存储
+        message = update.message
+        now_utc = datetime.datetime.now(pytz.UTC)
         
+        # 获取用户当前时区
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT timezone FROM drivers WHERE user_id = %s", (user.id,))
+                result = cur.fetchone()
+                current_timezone = result[0] if result else DEFAULT_TIMEZONE
+        finally:
+            release_db_connection(conn)
+
+        # 如果消息包含位置信息，更新用户时区
+        if message.location:
+            lat = message.location.latitude
+            lon = message.location.longitude
+            new_timezone = get_timezone_from_location(lat, lon)
+            
+            # 更新用户时区
+            conn = get_db_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE drivers SET timezone = %s WHERE user_id = %s",
+                        (new_timezone, user.id)
+                    )
+                    conn.commit()
+            finally:
+                release_db_connection(conn)
+                
+            current_timezone = new_timezone
+            location_info = f"\n📍 时区自动识别：{new_timezone}"
+        else:
+            location_info = f"\n⚠️ 使用已存储时区：{current_timezone}"
+
+        # 转换为用户时区的时间
+        user_tz = pytz.timezone(current_timezone)
+        now_local = now_utc.astimezone(user_tz)
+        today = now_local.date()
+        
+        # 保存打卡记录
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
@@ -593,21 +745,33 @@ def clockin(update, context):
                     # 更新记录
                     cur.execute(
                         "UPDATE clock_logs SET clock_in = %s, is_off = FALSE WHERE user_id = %s AND date = %s",
-                        (clock_time, user.id, today)
+                        (now_utc, user.id, today)
                     )
                 else:
                     # 插入新记录
                     cur.execute(
                         "INSERT INTO clock_logs (user_id, date, clock_in) VALUES (%s, %s, %s)",
-                        (user.id, today, clock_time)
+                        (user.id, today, now_utc)
                     )
                 conn.commit()
         finally:
             release_db_connection(conn)
+
+        # 发送打卡成功消息
+        time_str = now_local.strftime("%Y-%m-%d %H:%M:%S")
+        update.message.reply_text(f"✅ 打卡成功：{time_str}{location_info}")
         
-        # 显示用户时区的时间
-        local_time = clock_time.astimezone(pytz.timezone(get_user_timezone(user.id)))
-        update.message.reply_text(f"✅ Clocked in at {format_local_time(local_time)}")
+        # 请求位置（如果没有提供）
+        if not message.location:
+            location_button = KeyboardButton("📍 Share Location", request_location=True)
+            reply_markup = ReplyKeyboardMarkup([[location_button]], resize_keyboard=True, one_time_keyboard=True)
+            update.message.reply_text(
+                "Please share your location for timezone verification:",
+                reply_markup=reply_markup
+            )
+            context.user_data['location_pending'] = True
+            context.user_data['clockin_time'] = time_str
+            
     except Exception as e:
         logger.error(f"Error in clockin: {str(e)}")
         update.message.reply_text("❌ An error occurred while clocking in. Please try again.")
@@ -766,7 +930,8 @@ def salary_start(update, context):
     """开始设置薪资"""
     try:
         if update.effective_user.id not in ADMIN_IDS:
-            return
+            update.message.reply_text("❌ You don't have permission to use this command.")
+            return ConversationHandler.END
         
         # 清理之前的状态
         context.user_data.clear()
@@ -779,16 +944,22 @@ def salary_start(update, context):
         finally:
             release_db_connection(conn)
         
+        if not drivers:
+            update.message.reply_text("❌ No drivers found in the system.")
+            return ConversationHandler.END
+        
         keyboard = [[f"{driver[1]} (ID: {driver[0]})"] for driver in drivers]
         context.user_data['salary_drivers'] = {f"{driver[1]} (ID: {driver[0]})": driver[0] for driver in drivers}
         
         update.message.reply_text(
-            "👤 Select driver to set salary:",
+            "👤 Select driver to set salary:\n"
+            "Or use /cancel to cancel this operation.",
             reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         )
         return SALARY_SELECT_DRIVER
     except Exception as e:
         logger.error(f"Error in salary_start: {str(e)}")
+        context.user_data.clear()  # 确保清理状态
         update.message.reply_text(
             "❌ An error occurred. Please try /salary command again.",
             reply_markup=ReplyKeyboardRemove()
@@ -797,10 +968,19 @@ def salary_start(update, context):
 
 def salary_select_driver(update, context):
     try:
+        if update.message.text.startswith('/'):  # 如果是命令，结束对话
+            context.user_data.clear()
+            update.message.reply_text(
+                "❌ Operation cancelled due to new command.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
+            
         selected = update.message.text
         drivers = context.user_data.get('salary_drivers', {})
         
         if selected not in drivers:
+            context.user_data.clear()
             update.message.reply_text(
                 "❌ Invalid selection.",
                 reply_markup=ReplyKeyboardRemove()
@@ -809,12 +989,14 @@ def salary_select_driver(update, context):
         
         context.user_data['selected_driver'] = drivers[selected]
         update.message.reply_text(
-            "💰 Enter monthly salary (RM):",
+            "💰 Enter monthly salary (RM):\n"
+            "Or use /cancel to cancel this operation.",
             reply_markup=ReplyKeyboardRemove()
         )
         return SALARY_ENTER_AMOUNT
     except Exception as e:
         logger.error(f"Error in salary_select_driver: {str(e)}")
+        context.user_data.clear()  # 确保清理状态
         update.message.reply_text(
             "❌ An error occurred. Please try /salary command again.",
             reply_markup=ReplyKeyboardRemove()
@@ -823,16 +1005,34 @@ def salary_select_driver(update, context):
 
 def salary_enter_amount(update, context):
     try:
+        if update.message.text.startswith('/'):  # 如果是命令，结束对话
+            context.user_data.clear()
+            update.message.reply_text(
+                "❌ Operation cancelled due to new command.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
+            
         try:
             amount = float(update.message.text)
+            if amount <= 0:
+                raise ValueError("Salary must be positive")
         except ValueError:
             update.message.reply_text(
-                "❌ Please enter a valid number.",
+                "❌ Please enter a valid positive number.\n"
+                "Or use /cancel to cancel this operation.",
                 reply_markup=ReplyKeyboardRemove()
             )
             return SALARY_ENTER_AMOUNT
         
         driver_id = context.user_data.get('selected_driver')
+        if not driver_id:
+            context.user_data.clear()
+            update.message.reply_text(
+                "❌ Session expired. Please try /salary command again.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
         
         conn = get_db_connection()
         try:
@@ -857,342 +1057,9 @@ def salary_enter_amount(update, context):
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error in salary_enter_amount: {str(e)}")
+        context.user_data.clear()  # 确保清理状态
         update.message.reply_text(
             "❌ An error occurred. Please try /salary command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-# === PDF 生成功能 ===
-def pdf_start(update, context):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    
-    with db_pool.getconn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT user_id, first_name, username FROM drivers")
-            drivers = cur.fetchall()
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 All Drivers", callback_data="all")]
-    ]
-    
-    # Add individual driver buttons
-    for driver in drivers:
-        keyboard.append([
-            InlineKeyboardButton(
-                f"@{driver[2]}" if driver[2] else driver[1],
-                callback_data=str(driver[0])
-            )
-        ])
-    
-    update.message.reply_text(
-        "🧾 Select driver for PDF report:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-def pdf_button_callback(update, context):
-    query = update.callback_query
-    query.answer()
-    
-    if query.data == "all":
-        query.edit_message_text("🔄 Generating reports for all drivers...")
-        generate_all_pdfs(query)
-    else:
-        query.edit_message_text("🔄 Generating report...")
-        generate_single_pdf(query, int(query.data))
-
-def generate_all_pdfs(query):
-    try:
-        temp_dir = tempfile.mkdtemp()
-        
-        with db_pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id, first_name, username FROM drivers")
-                drivers = cur.fetchall()
-        
-        for driver in drivers:
-            driver_id, first_name, username = driver
-            name = f"@{username}" if username else first_name
-            output_path = os.path.join(temp_dir, f"driver_{driver_id}.pdf")
-            generate_driver_pdf(driver_id, name, bot, output_path)
-            
-            with open(output_path, 'rb') as f:
-                bot.send_document(
-                    chat_id=query.message.chat_id,
-                    document=f,
-                    caption=f"Report for {name}"
-                )
-        
-        query.edit_message_text("✅ All reports generated")
-    except Exception as e:
-        logger.error(f"PDF generation error: {e}")
-        query.edit_message_text(f"❌ Error: {str(e)}")
-
-def generate_single_pdf(query, driver_id):
-    try:
-        with db_pool.getconn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT first_name, username FROM drivers WHERE user_id = %s",
-                    (driver_id,)
-                )
-                driver = cur.fetchone()
-        
-        if not driver:
-            query.edit_message_text("❌ Driver not found")
-            return
-        
-        name = f"@{driver[1]}" if driver[1] else driver[0]
-        temp_dir = tempfile.mkdtemp()
-        output_path = os.path.join(temp_dir, f"driver_{driver_id}.pdf")
-        
-        generate_driver_pdf(driver_id, name, bot, output_path)
-        
-        with open(output_path, 'rb') as f:
-            bot.send_document(
-                chat_id=query.message.chat_id,
-                document=f,
-                caption=f"Report for {name}"
-            )
-        
-        query.edit_message_text("✅ Report generated")
-    except Exception as e:
-        logger.error(f"PDF generation error: {e}")
-        query.edit_message_text(f"❌ Error: {str(e)}")
-
-# === 充值功能 ===
-def topup_start(update, context):
-    """开始充值流程"""
-    try:
-        if update.effective_user.id not in ADMIN_IDS:
-            return
-        
-        # 清理之前的状态
-        context.user_data.clear()
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id, first_name, username FROM drivers")
-                drivers = cur.fetchall()
-        finally:
-            release_db_connection(conn)
-        
-        keyboard = [[f"{driver[1]} (ID: {driver[0]})"] for driver in drivers]
-        context.user_data['topup_drivers'] = {f"{driver[1]} (ID: {driver[0]})": driver[0] for driver in drivers}
-        
-        update.message.reply_text(
-            "👤 Select driver to top up:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
-        return TOPUP_USER
-    except Exception as e:
-        logger.error(f"Error in topup_start: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /topup command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def topup_user(update, context):
-    try:
-        selected = update.message.text
-        drivers = context.user_data.get('topup_drivers', {})
-        
-        if selected not in drivers:
-            update.message.reply_text(
-                "❌ Invalid selection.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return ConversationHandler.END
-        
-        context.user_data['selected_driver'] = drivers[selected]
-        update.message.reply_text(
-            "💰 Enter amount (RM):",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return TOPUP_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in topup_user: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /topup command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def topup_amount(update, context):
-    try:
-        try:
-            amount = float(update.message.text)
-        except ValueError:
-            update.message.reply_text(
-                "❌ Please enter a valid number.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return TOPUP_AMOUNT
-        
-        driver_id = context.user_data.get('selected_driver')
-        admin_id = update.effective_user.id
-        date = get_current_date_for_user(admin_id)
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 更新余额
-                cur.execute(
-                    "UPDATE drivers SET balance = balance + %s WHERE user_id = %s",
-                    (amount, driver_id)
-                )
-                
-                # 记录充值
-                cur.execute(
-                    "INSERT INTO topups (user_id, amount, date, admin_id) VALUES (%s, %s, %s, %s)",
-                    (driver_id, amount, date, admin_id)
-                )
-                conn.commit()
-        finally:
-            release_db_connection(conn)
-        
-        update.message.reply_text(
-            f"✅ Topped up RM{amount:.2f}",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # 清理状态
-        context.user_data.clear()
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error in topup_amount: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /topup command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-# === 报销功能 ===
-def claim_start(update, context):
-    """开始报销流程"""
-    try:
-        # 清理之前的状态
-        context.user_data.clear()
-        
-        keyboard = [["Toll", "Petrol"], ["Parking", "Other"]]
-        update.message.reply_text(
-            "🚗 Select claim type:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-        )
-        return CLAIM_TYPE
-    except Exception as e:
-        logger.error(f"Error in claim_start: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_type(update, context):
-    try:
-        claim_type = update.message.text
-        context.user_data['claim_type'] = claim_type
-        
-        if claim_type.lower() == "other":
-            update.message.reply_text(
-                "✍️ Please describe the claim type:",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return CLAIM_OTHER_TYPE
-        
-        update.message.reply_text(
-            "💰 Enter amount (RM):",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return CLAIM_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in claim_type: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_other_type(update, context):
-    try:
-        context.user_data['claim_type'] = update.message.text
-        update.message.reply_text(
-            "💰 Enter amount (RM):",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return CLAIM_AMOUNT
-    except Exception as e:
-        logger.error(f"Error in claim_other_type: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_amount(update, context):
-    try:
-        try:
-            amount = float(update.message.text)
-        except ValueError:
-            update.message.reply_text(
-                "❌ Please enter a valid number.",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return CLAIM_AMOUNT
-            
-        context.user_data['claim_amount'] = amount
-        update.message.reply_text("📎 Please send a photo of the receipt:")
-        return CLAIM_PROOF
-    except Exception as e:
-        logger.error(f"Error in claim_amount: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
-
-def claim_proof(update, context):
-    try:
-        user = update.effective_user
-        photo_file = update.message.photo[-1].file_id
-        date = get_current_date_for_user(user.id)
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 记录报销
-                cur.execute(
-                    "INSERT INTO claims (user_id, type, amount, date, photo_file_id) "
-                    "VALUES (%s, %s, %s, %s, %s)",
-                    (user.id, context.user_data['claim_type'], 
-                     context.user_data['claim_amount'], date, photo_file)
-                )
-                
-                # 扣除余额
-                cur.execute(
-                    "UPDATE drivers SET balance = balance - %s WHERE user_id = %s",
-                    (context.user_data['claim_amount'], user.id)
-                )
-                conn.commit()
-        finally:
-            release_db_connection(conn)
-        
-        update.message.reply_text(
-            f"✅ Claim submitted for {context.user_data['claim_type']}: "
-            f"RM{context.user_data['claim_amount']:.2f}",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # 清理状态
-        context.user_data.clear()
-        return ConversationHandler.END
-    except Exception as e:
-        logger.error(f"Error in claim_proof: {str(e)}")
-        update.message.reply_text(
-            "❌ An error occurred. Please try /claim command again.",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
@@ -1358,51 +1225,41 @@ def init_bot():
     dispatcher.add_handler(CommandHandler("balance", balance))
     dispatcher.add_handler(CommandHandler("check", check))
     dispatcher.add_handler(CommandHandler("viewclaims", viewclaims))
-    dispatcher.add_handler(CommandHandler("PDF", pdf_start))
-    dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r'^all|\d+$'))
-
-    # 添加 PAID 命令处理程序
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("paid", paid_start)],
+    dispatcher.add_handler(CommandHandler("cancel", cancel))
+    
+    # 添加位置处理器
+    dispatcher.add_handler(MessageHandler(Filters.location, handle_location))
+    
+    # 添加打卡后文本消息处理器（处理拒绝位置的情况）
+    dispatcher.add_handler(MessageHandler(
+        Filters.text & ~Filters.command, 
+        handle_text_after_clockin
+    ))
+    
+    # 添加 salary 命令处理器
+    salary_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('salary', salary_start)],
         states={
-            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
+            SALARY_SELECT_DRIVER: [CallbackQueryHandler(salary_select_driver)],
+            SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, salary_enter_amount)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    dispatcher.add_handler(salary_conv_handler)
+    
+    # 添加 paid 命令处理器
+    paid_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('paid', paid_start)],
+        states={
+            PAID_SELECT_DRIVER: [CallbackQueryHandler(paid_select_driver)],
             PAID_START_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_start_date)],
-            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)],
+            PAID_END_DATE: [MessageHandler(Filters.text & ~Filters.command, paid_end_date)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    dispatcher.add_handler(paid_conv_handler)
 
-    # 其他对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("salary", salary_start)],
-        states={
-            SALARY_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, salary_select_driver)],
-            SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, salary_enter_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("topup", topup_start)],
-        states={
-            TOPUP_USER: [MessageHandler(Filters.text & ~Filters.command, topup_user)],
-            TOPUP_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, topup_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("claim", claim_start)],
-        states={
-            CLAIM_TYPE: [MessageHandler(Filters.text & ~Filters.command, claim_type)],
-            CLAIM_OTHER_TYPE: [MessageHandler(Filters.text & ~Filters.command, claim_other_type)],
-            CLAIM_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, claim_amount)],
-            CLAIM_PROOF: [MessageHandler(Filters.photo, claim_proof)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    # 注册错误处理器
+    # 添加错误处理器
     dispatcher.add_error_handler(error_handler)
     
     logger.info("Bot handlers initialized successfully")
@@ -1662,3 +1519,27 @@ def paid_end_date(update, context):
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
+
+# === 添加地址解析功能 ===
+def get_address_from_location(latitude, longitude):
+    """根据经纬度获取地址"""
+    try:
+        # 使用环境变量中的API密钥，避免在代码中暴露
+        api_key = os.getenv('GOOGLE_API_KEY')
+        if not api_key:
+            logger.error("GOOGLE_API_KEY not set in environment variables")
+            return "API key not available"
+            
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={latitude},{longitude}&key={api_key}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['status'] == 'OK' and data['results']:
+            # 获取最精确的地址
+            return data['results'][0]['formatted_address']
+        else:
+            logger.error(f"Error getting address: {data['status']}")
+            return "Address not available"
+    except Exception as e:
+        logger.error(f"Error in get_address_from_location: {e}")
+        return "Address lookup failed"
