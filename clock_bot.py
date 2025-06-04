@@ -1336,11 +1336,16 @@ def viewclocking_select_user(update, context):
                 cur.execute(
                     """SELECT date, clock_in, clock_out, is_off,
                           CASE 
-                              WHEN clock_in = 'OFF' THEN 0
-                              WHEN clock_out IS NULL THEN 0
-                              ELSE EXTRACT(EPOCH FROM (
-                                  clock_out::timestamp - clock_in::timestamp
-                              ))/3600
+                              WHEN is_off = TRUE THEN 0
+                              WHEN clock_out IS NULL OR clock_in IS NULL THEN 0
+                              ELSE 
+                                  CASE 
+                                      WHEN clock_in = 'OFF' OR clock_out = 'OFF' THEN 0
+                                      ELSE 
+                                          EXTRACT(EPOCH FROM (
+                                              clock_out::timestamp - clock_in::timestamp
+                                          ))/3600
+                                  END
                           END as hours_worked
                        FROM clock_logs 
                        WHERE user_id = %s 
@@ -1378,10 +1383,12 @@ def viewclocking_select_user(update, context):
                     if is_off:
                         message.append(f"\n{date}: Off Day")
                     else:
+                        in_time = "Not clocked in" if clock_in is None else clock_in
+                        out_time = "Not clocked out" if clock_out is None else clock_out
                         message.append(
                             f"\n{date}:"
-                            f"\nIn: {clock_in or 'Not clocked in'}"
-                            f"\nOut: {clock_out or 'Not clocked out'}"
+                            f"\nIn: {in_time}"
+                            f"\nOut: {out_time}"
                             f"\nHours: {format_duration(hours)}"
                         )
                     message.append("-" * 20)
