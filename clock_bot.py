@@ -533,21 +533,39 @@ def start(update, context):
                 )
                 conn.commit()
                 welcome_msg = (
-                    f"👋 Welcome {user.first_name}!\n\n"
-                    "I'm your clock-in assistant. Here are the available commands:\n\n"
-                    "📍 /clockin - Clock in with location\n"
-                    "🏁 /clockout - Clock out\n"
-                    "📅 /check - Check today's record\n"
-                    "🏖 /offday - Mark today as off day"
+                    f"👋 Hello {user.first_name}!\n"
+                    "Welcome to Driver ClockIn Bot.\n\n"
+                    "Available Commands:\n"
+                    "🕑 /clockin\n"
+                    "🏁 /clockout\n"
+                    "📅 /offday\n"
+                    "💸 /claim\n\n"
+                    "🔐 Admin Commands:\n"
+                    "📊 /balance\n"
+                    "📄 /check\n"
+                    "🧾 /PDF\n"
+                    "💵 /topup\n"
+                    "📷 /viewclaims\n"
+                    "💰 /salary\n"
+                    "🟢 /paid"
                 )
             else:
                 welcome_msg = (
-                    f"👋 Welcome back {user.first_name}!\n\n"
-                    "Available commands:\n\n"
-                    "📍 /clockin - Clock in with location\n"
-                    "🏁 /clockout - Clock out\n"
-                    "📅 /check - Check today's record\n"
-                    "🏖 /offday - Mark today as off day"
+                    f"👋 Hello {user.first_name}!\n"
+                    "Welcome to Driver ClockIn Bot.\n\n"
+                    "Available Commands:\n"
+                    "🕑 /clockin\n"
+                    "🏁 /clockout\n"
+                    "📅 /offday\n"
+                    "💸 /claim\n\n"
+                    "🔐 Admin Commands:\n"
+                    "📊 /balance\n"
+                    "📄 /check\n"
+                    "🧾 /PDF\n"
+                    "💵 /topup\n"
+                    "📷 /viewclaims\n"
+                    "💰 /salary\n"
+                    "🟢 /paid"
                 )
     except Exception as e:
         logger.error(f"Error in start command: {str(e)}")
