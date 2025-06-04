@@ -69,6 +69,7 @@ PAID_END_DATE = 2
 VIEWCLAIMS_SELECT_USER = 10
 CHECKSTATE_SELECT_USER = 11
 SALARY_CONFIRM = 2
+PAID_CONFIRM = 3
 
 # === 数据库连接池 ===
 db_pool = None
@@ -266,6 +267,25 @@ def init_db():
                     start_time TIMESTAMP WITH TIME ZONE,
                     end_time TIMESTAMP WITH TIME ZONE,
                     duration FLOAT DEFAULT 0.0,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+                
+                # 添加工资发放记录表
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS salary_payments (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES drivers(user_id),
+                    payment_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    salary_amount FLOAT NOT NULL,
+                    claims_amount FLOAT DEFAULT 0.0,
+                    total_amount FLOAT NOT NULL,
+                    work_days INTEGER DEFAULT 0,
+                    off_days INTEGER DEFAULT 0,
+                    work_hours FLOAT DEFAULT 0.0,
+                    ot_hours FLOAT DEFAULT 0.0,
+                    period_start DATE NOT NULL,
+                    period_end DATE NOT NULL,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
                 """)
@@ -523,7 +543,18 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 5. 打卡对话处理器
+    # 5. 工资发放对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("paid", paid_start)],
+        states={
+            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
+            PAID_CONFIRM: [MessageHandler(Filters.text & ~Filters.command, paid_confirm)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 6. 打卡对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("clockin", clockin)],
         states={
@@ -962,20 +993,232 @@ def claim_proof(update, context):
     return ConversationHandler.END
 
 def paid_start(update, context):
-    # Implementation of paid_start function
-    pass
+    """开始发放工资流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    return show_workers_page(update, context, page=1, command="paid")
 
 def paid_select_driver(update, context):
-    # Implementation of paid_select_driver function
-    pass
+    """选择要发放工资的员工"""
+    # 检查是否是导航命令
+    nav_result = handle_page_navigation(update, context)
+    if nav_result is not None:
+        return nav_result
+    
+    try:
+        user_id = int(update.message.text.split()[0])
+        context.user_data['target_user_id'] = user_id
+        
+        # 获取本月的第一天和最后一天
+        today = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
+        first_day = today.replace(day=1)
+        next_month = today.replace(day=28) + datetime.timedelta(days=4)
+        last_day = (next_month - datetime.timedelta(days=next_month.day)).date()
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 获取员工基本信息
+                cur.execute(
+                    """SELECT first_name, monthly_salary 
+                       FROM drivers 
+                       WHERE user_id = %s""",
+                    (user_id,)
+                )
+                worker_info = cur.fetchone()
+                if not worker_info:
+                    update.message.reply_text("❌ Worker not found.")
+                    return ConversationHandler.END
+                
+                name, monthly_salary = worker_info
+                context.user_data['worker_name'] = name
+                
+                # 获取本月工作统计
+                cur.execute(
+                    """SELECT 
+                        COUNT(DISTINCT date) as work_days,
+                        COUNT(DISTINCT CASE WHEN is_off THEN date END) as off_days
+                       FROM clock_logs 
+                       WHERE user_id = %s 
+                       AND date BETWEEN %s AND %s""",
+                    (user_id, first_day, last_day)
+                )
+                work_stats = cur.fetchone()
+                work_days, off_days = work_stats if work_stats else (0, 0)
+                
+                # 获取本月工作时长
+                cur.execute(
+                    """SELECT date, clock_in, clock_out, is_off
+                       FROM clock_logs 
+                       WHERE user_id = %s 
+                       AND date BETWEEN %s AND %s""",
+                    (user_id, first_day, last_day)
+                )
+                logs = cur.fetchall()
+                
+                # 计算工作时长
+                month_hours = 0
+                for log in logs:
+                    date, clock_in, clock_out, is_off = log
+                    if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
+                        try:
+                            if isinstance(clock_in, str) and isinstance(clock_out, str):
+                                in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
+                                out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
+                                hours = (out_time - in_time).total_seconds() / 3600
+                                if hours > 0:
+                                    month_hours += hours
+                        except (ValueError, TypeError):
+                            continue
+                
+                # 获取本月 OT 时长
+                cur.execute(
+                    """SELECT COALESCE(SUM(duration), 0) as total_ot_hours
+                       FROM ot_logs 
+                       WHERE user_id = %s 
+                       AND date BETWEEN %s AND %s
+                       AND end_time IS NOT NULL""",
+                    (user_id, first_day, last_day)
+                )
+                ot_hours = cur.fetchone()[0] or 0
+                ot_hours_int = int(ot_hours)
+                ot_minutes = int((ot_hours - ot_hours_int) * 60)
+                
+                # 获取本月报销总额
+                cur.execute(
+                    """SELECT COALESCE(SUM(amount), 0) as total_claims
+                       FROM claims 
+                       WHERE user_id = %s 
+                       AND date BETWEEN %s AND %s""",
+                    (user_id, first_day, last_day)
+                )
+                claims_amount = cur.fetchone()[0] or 0
+                
+                # 保存数据到上下文
+                context.user_data.update({
+                    'monthly_salary': monthly_salary,
+                    'work_days': work_days,
+                    'off_days': off_days,
+                    'month_hours': month_hours,
+                    'ot_hours': ot_hours,
+                    'claims_amount': claims_amount,
+                    'first_day': first_day,
+                    'last_day': last_day
+                })
+                
+                # 创建工资总结消息
+                message = [
+                    f"💰 Salary Summary for {name}\n",
+                    f"📅 Period: {first_day.strftime('%Y-%m-%d')} to {last_day.strftime('%Y-%m-%d')}\n",
+                    f"💵 Base Salary: RM {monthly_salary:.2f}",
+                    f"⏰ Work Hours: {format_duration(month_hours)}",
+                    f"🕒 OT Hours: {ot_hours_int}h {ot_minutes}m",
+                    f"📊 Work Days: {work_days} days",
+                    f"🏖 Off Days: {off_days} days",
+                    f"🧾 Claims: RM {claims_amount:.2f}\n",
+                    "Do you want to mark this month's salary as paid?"
+                ]
+                
+                # 创建确认键盘
+                keyboard = [
+                    ["✅ Confirm Payment"],
+                    ["❌ Cancel"]
+                ]
+                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+                
+                update.message.reply_text(
+                    "\n".join(message),
+                    reply_markup=reply_markup
+                )
+                return PAID_CONFIRM
+                
+        except Exception as e:
+            logger.error(f"Error in paid_select_driver: {str(e)}")
+            update.message.reply_text("❌ An error occurred. Please try again.")
+            return ConversationHandler.END
+        finally:
+            release_db_connection(conn)
+            
+    except (ValueError, IndexError):
+        update.message.reply_text("❌ Please select a valid worker.")
+        return PAID_SELECT_DRIVER
 
-def paid_start_date(update, context):
-    # Implementation of paid_start_date function
-    pass
-
-def paid_end_date(update, context):
-    # Implementation of paid_end_date function
-    pass
+def paid_confirm(update, context):
+    """确认工资发放"""
+    if update.message.text == "❌ Cancel":
+        update.message.reply_text(
+            "Operation cancelled.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
+    if update.message.text != "✅ Confirm Payment":
+        update.message.reply_text("Please either confirm or cancel the operation.")
+        return PAID_CONFIRM
+    
+    user_id = context.user_data['target_user_id']
+    name = context.user_data['worker_name']
+    monthly_salary = context.user_data['monthly_salary']
+    claims_amount = context.user_data['claims_amount']
+    
+    # 计算总金额
+    total_amount = monthly_salary + claims_amount
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 记录工资发放
+            cur.execute(
+                """INSERT INTO salary_payments 
+                   (user_id, payment_date, salary_amount, claims_amount, total_amount, 
+                    work_days, off_days, work_hours, ot_hours, period_start, period_end)
+                   VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (user_id, monthly_salary, claims_amount, total_amount,
+                 context.user_data['work_days'], context.user_data['off_days'],
+                 context.user_data['month_hours'], context.user_data['ot_hours'],
+                 context.user_data['first_day'], context.user_data['last_day'])
+            )
+            
+            # 清除已支付的报销记录
+            cur.execute(
+                """UPDATE claims 
+                   SET status = 'PAID', paid_date = CURRENT_TIMESTAMP
+                   WHERE user_id = %s 
+                   AND date BETWEEN %s AND %s 
+                   AND status = 'PENDING'""",
+                (user_id, context.user_data['first_day'], context.user_data['last_day'])
+            )
+            
+            conn.commit()
+            
+            # 发送确认消息
+            message = [
+                f"✅ Payment Confirmed for {name}\n",
+                f"💵 Base Salary: RM {monthly_salary:.2f}",
+                f"🧾 Claims: RM {claims_amount:.2f}",
+                f"💰 Total Paid: RM {total_amount:.2f}\n",
+                f"Payment recorded successfully!"
+            ]
+            
+            update.message.reply_text(
+                "\n".join(message),
+                reply_markup=ReplyKeyboardRemove()
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in paid_confirm: {str(e)}")
+        update.message.reply_text(
+            "❌ An error occurred while processing the payment. Please try again.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    finally:
+        release_db_connection(conn)
+        context.user_data.clear()
+    
+    return ConversationHandler.END
 
 def pdf_start(update, context):
     """开始生成PDF报告流程"""
