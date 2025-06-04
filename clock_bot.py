@@ -59,17 +59,15 @@ dispatcher = None
 # === 状态常量 ===
 SALARY_SELECT_DRIVER = 0
 SALARY_ENTER_AMOUNT = 1
+SALARY_CONFIRM = 2
 CLAIM_TYPE = 0
 CLAIM_OTHER_TYPE = 1
 CLAIM_AMOUNT = 2
 CLAIM_PROOF = 3
 PAID_SELECT_DRIVER = 0
-PAID_START_DATE = 1
-PAID_END_DATE = 2
+PAID_CONFIRM = 1
 VIEWCLAIMS_SELECT_USER = 10
 CHECKSTATE_SELECT_USER = 11
-SALARY_CONFIRM = 2
-PAID_CONFIRM = 3
 
 # === 数据库连接池 ===
 db_pool = None
@@ -1008,7 +1006,17 @@ def paid_select_driver(update, context):
     if nav_result is not None:
         return nav_result
     
+    if update.message.text == "❌ Cancel":
+        update.message.reply_text(
+            "Operation cancelled.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
     try:
+        # 记录日志，帮助调试
+        logger.info(f"paid_select_driver received text: '{update.message.text}'")
+        
         user_id = int(update.message.text.split()[0])
         context.user_data['target_user_id'] = user_id
         
@@ -1030,7 +1038,10 @@ def paid_select_driver(update, context):
                 )
                 worker_info = cur.fetchone()
                 if not worker_info:
-                    update.message.reply_text("❌ Worker not found.")
+                    update.message.reply_text(
+                        "❌ Worker not found.",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
                     return ConversationHandler.END
                 
                 name, monthly_salary = worker_info
@@ -1039,7 +1050,7 @@ def paid_select_driver(update, context):
                 # 获取本月工作统计
                 cur.execute(
                     """SELECT 
-                        COUNT(DISTINCT date) as work_days,
+                        COUNT(DISTINCT CASE WHEN NOT is_off THEN date END) as work_days,
                         COUNT(DISTINCT CASE WHEN is_off THEN date END) as off_days
                        FROM clock_logs 
                        WHERE user_id = %s 
@@ -1092,7 +1103,8 @@ def paid_select_driver(update, context):
                     """SELECT COALESCE(SUM(amount), 0) as total_claims
                        FROM claims 
                        WHERE user_id = %s 
-                       AND date BETWEEN %s AND %s""",
+                       AND date BETWEEN %s AND %s
+                       AND status = 'PENDING'""",
                     (user_id, first_day, last_day)
                 )
                 claims_amount = cur.fetchone()[0] or 0
@@ -1137,13 +1149,20 @@ def paid_select_driver(update, context):
                 
         except Exception as e:
             logger.error(f"Error in paid_select_driver: {str(e)}")
-            update.message.reply_text("❌ An error occurred. Please try again.")
+            update.message.reply_text(
+                "❌ An error occurred. Please try again.",
+                reply_markup=ReplyKeyboardRemove()
+            )
             return ConversationHandler.END
         finally:
             release_db_connection(conn)
             
-    except (ValueError, IndexError):
-        update.message.reply_text("❌ Please select a valid worker.")
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing user input in paid_select_driver: {str(e)}")
+        update.message.reply_text(
+            "❌ Please select a valid worker.",
+            reply_markup=ReplyKeyboardRemove()
+        )
         return PAID_SELECT_DRIVER
 
 def paid_confirm(update, context):
@@ -1574,6 +1593,9 @@ def show_workers_page(update, context, page=1, command=""):
             if nav_buttons:
                 keyboard.append(nav_buttons)
             
+            # 添加取消按钮
+            keyboard.append(["❌ Cancel"])
+            
             reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
             
             # 保存当前页码和命令到上下文
@@ -1589,6 +1611,8 @@ def show_workers_page(update, context, page=1, command=""):
                 return VIEWCLAIMS_SELECT_USER
             elif command == "checkstate":
                 return CHECKSTATE_SELECT_USER
+            elif command == "paid":
+                return PAID_SELECT_DRIVER
             return ConversationHandler.END
             
     except Exception as e:
