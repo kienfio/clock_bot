@@ -1023,8 +1023,14 @@ def paid_select_driver(update, context):
         # 获取本月的第一天和最后一天
         today = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
         first_day = today.replace(day=1)
-        next_month = today.replace(day=28) + datetime.timedelta(days=4)
-        last_day = (next_month - datetime.timedelta(days=next_month.day)).date()
+        # 计算下个月的第一天，然后减去一天得到本月最后一天
+        if today.month == 12:
+            next_month = today.replace(year=today.year + 1, month=1, day=1)
+        else:
+            next_month = today.replace(month=today.month + 1, day=1)
+        last_day = next_month - datetime.timedelta(days=1)
+        
+        logger.info(f"Period: {first_day} to {last_day}")
         
         conn = get_db_connection()
         try:
@@ -1104,7 +1110,7 @@ def paid_select_driver(update, context):
                        FROM claims 
                        WHERE user_id = %s 
                        AND date BETWEEN %s AND %s
-                       AND status = 'PENDING'""",
+                       AND (status IS NULL OR status = 'PENDING')""",
                     (user_id, first_day, last_day)
                 )
                 claims_amount = cur.fetchone()[0] or 0
@@ -1182,6 +1188,8 @@ def paid_confirm(update, context):
     name = context.user_data['worker_name']
     monthly_salary = context.user_data['monthly_salary']
     claims_amount = context.user_data['claims_amount']
+    first_day = context.user_data['first_day']
+    last_day = context.user_data['last_day']
     
     # 计算总金额
     total_amount = monthly_salary + claims_amount
@@ -1198,7 +1206,7 @@ def paid_confirm(update, context):
                 (user_id, monthly_salary, claims_amount, total_amount,
                  context.user_data['work_days'], context.user_data['off_days'],
                  context.user_data['month_hours'], context.user_data['ot_hours'],
-                 context.user_data['first_day'], context.user_data['last_day'])
+                 first_day, last_day)
             )
             
             # 清除已支付的报销记录
@@ -1207,8 +1215,8 @@ def paid_confirm(update, context):
                    SET status = 'PAID', paid_date = CURRENT_TIMESTAMP
                    WHERE user_id = %s 
                    AND date BETWEEN %s AND %s 
-                   AND status = 'PENDING'""",
-                (user_id, context.user_data['first_day'], context.user_data['last_day'])
+                   AND (status IS NULL OR status = 'PENDING')""",
+                (user_id, first_day, last_day)
             )
             
             conn.commit()
