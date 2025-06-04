@@ -257,6 +257,19 @@ def init_db():
                 )
                 """)
                 
+                # 添加 OT 记录表
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS ot_logs (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES drivers(user_id),
+                    date DATE NOT NULL,
+                    start_time TIMESTAMP WITH TIME ZONE,
+                    end_time TIMESTAMP WITH TIME ZONE,
+                    duration FLOAT DEFAULT 0.0,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+                
                 # 确保 location_address 列存在
                 cur.execute("""
                 DO $$
@@ -526,6 +539,7 @@ def init_bot():
     # 注册简单命令处理器
     dispatcher.add_handler(CommandHandler("clockout", clockout))
     dispatcher.add_handler(CommandHandler("offday", offday))
+    dispatcher.add_handler(CommandHandler("OT", ot))
     
     # 注册错误处理器
     dispatcher.add_error_handler(error_handler)
@@ -557,7 +571,8 @@ def start(update, context):
                     "🕑 /clockin\n"
                     "🏁 /clockout\n"
                     "📅 /offday\n"
-                    "💸 /claim\n\n"
+                    "💸 /claim\n"
+                    "⏰ /OT\n\n"
                     "🔐 Admin Commands:\n"
                     "📊 /checkstate\n"
                     "🧾 /PDF\n"
@@ -573,7 +588,8 @@ def start(update, context):
                     "🕑 /clockin\n"
                     "🏁 /clockout\n"
                     "📅 /offday\n"
-                    "💸 /claim\n\n"
+                    "💸 /claim\n"
+                    "⏰ /OT\n\n"
                     "🔐 Admin Commands:\n"
                     "📊 /checkstate\n"
                     "🧾 /PDF\n"
@@ -1664,3 +1680,62 @@ def checkstate_select_user(update, context):
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END 
+
+def ot(update, context):
+    """处理 OT 命令"""
+    user = update.effective_user
+    now = get_current_time()
+    today = now.date()
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 检查是否有未完成的 OT 记录
+            cur.execute(
+                """SELECT id, start_time 
+                   FROM ot_logs 
+                   WHERE user_id = %s AND date = %s AND end_time IS NULL""",
+                (user.id, today)
+            )
+            ongoing_ot = cur.fetchone()
+            
+            if not ongoing_ot:
+                # 开始新的 OT
+                cur.execute(
+                    """INSERT INTO ot_logs (user_id, date, start_time)
+                       VALUES (%s, %s, %s)""",
+                    (user.id, today, now)
+                )
+                conn.commit()
+                
+                update.message.reply_text(
+                    "🕒 OT Started!\n"
+                    "Use /OT command again to end your OT session."
+                )
+            else:
+                # 结束现有的 OT
+                ot_id, start_time = ongoing_ot
+                duration = (now - start_time).total_seconds() / 3600  # 转换为小时
+                
+                cur.execute(
+                    """UPDATE ot_logs 
+                       SET end_time = %s, duration = %s 
+                       WHERE id = %s""",
+                    (now, duration, ot_id)
+                )
+                conn.commit()
+                
+                hours = int(duration)
+                minutes = int((duration - hours) * 60)
+                
+                update.message.reply_text(
+                    f"✅ OT Completed!\n"
+                    f"Duration: {hours}h {minutes}m\n"
+                    f"Start: {format_local_time(start_time)}\n"
+                    f"End: {format_local_time(now)}"
+                )
+    except Exception as e:
+        logger.error(f"Error in OT command: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+    finally:
+        release_db_connection(conn) 
