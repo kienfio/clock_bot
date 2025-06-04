@@ -1,5 +1,6 @@
 import os
 import psycopg2
+import psycopg2.extras
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import logging
 import requests
@@ -47,9 +48,15 @@ def init_database():
     
     try:
         # 连接数据库
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            cursor_factory=psycopg2.extras.DictCursor
+        )
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cur = conn.cursor()
+        
+        # 设置时区
+        cur.execute("SET timezone TO 'Asia/Kuala_Lumpur'")
         
         # 创建表
         # 1. 司机表
@@ -66,7 +73,7 @@ def init_database():
         """)
         logger.info("创建 drivers 表成功")
         
-        # 2. 打卡记录表 - 添加 location_address 字段
+        # 2. 打卡记录表
         cur.execute("""
         CREATE TABLE IF NOT EXISTS clock_logs (
             id SERIAL PRIMARY KEY,
@@ -82,39 +89,23 @@ def init_database():
         """)
         logger.info("创建 clock_logs 表成功")
         
-        # 3. 充值记录表
+        # 确保 location_address 列存在
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS topups (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT REFERENCES drivers(user_id),
-            amount FLOAT NOT NULL,
-            date DATE NOT NULL,
-            admin_id BIGINT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM information_schema.columns 
+                WHERE table_name='clock_logs' AND column_name='location_address'
+            ) THEN
+                ALTER TABLE clock_logs ADD COLUMN location_address TEXT;
+            END IF;
+        END $$;
         """)
-        logger.info("创建 topups 表成功")
         
-        # 4. 报销记录表
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS claims (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT REFERENCES drivers(user_id),
-            type TEXT NOT NULL,
-            amount FLOAT NOT NULL,
-            date DATE NOT NULL,
-            photo_file_id TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        logger.info("创建 claims 表成功")
-        
-        # 5. 创建索引
+        # 创建索引
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
-        CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
-        CREATE INDEX IF NOT EXISTS idx_topups_user_date ON topups(user_id, date);
         """)
         logger.info("创建索引成功")
         
