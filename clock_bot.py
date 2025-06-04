@@ -68,6 +68,7 @@ PAID_START_DATE = 1
 PAID_END_DATE = 2
 VIEWCLAIMS_SELECT_USER = 10
 CHECKSTATE_SELECT_USER = 11
+SALARY_CONFIRM = 2
 
 # === 数据库连接池 ===
 db_pool = None
@@ -503,6 +504,7 @@ def init_bot():
         states={
             SALARY_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, salary_select_driver)],
             SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, salary_enter_amount)],
+            SALARY_CONFIRM: [MessageHandler(Filters.text & ~Filters.command, salary_confirm)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True
@@ -706,19 +708,28 @@ def salary_start(update, context):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT user_id, first_name, monthly_salary FROM drivers")
+            cur.execute("SELECT user_id, first_name, monthly_salary FROM drivers ORDER BY first_name")
             drivers = cur.fetchall()
             
             if not drivers:
-                update.message.reply_text("No drivers found.")
+                update.message.reply_text("❌ No workers found in the system.")
                 return ConversationHandler.END
             
-            message = ["Select a worker to set salary:"]
+            message = ["👨‍💼 *Select a worker to set salary:*\n"]
+            keyboard = []
             for driver in drivers:
                 user_id, name, salary = driver
-                message.append(f"\n{user_id} - {name} (Current: RM {salary:.2f})")
+                message.append(f"*{name}*\nID: `{user_id}`\nCurrent Salary: RM {salary:.2f}\n")
+                keyboard.append([f"{name} ({user_id})"])
             
-            update.message.reply_text("\n".join(message))
+            keyboard.append(["❌ Cancel"])
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            
+            update.message.reply_text(
+                "\n".join(message),
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
+            )
             return SALARY_SELECT_DRIVER
     except Exception as e:
         logger.error(f"Error in salary_start: {str(e)}")
@@ -729,46 +740,115 @@ def salary_start(update, context):
 
 def salary_select_driver(update, context):
     """选择要设置工资的司机"""
+    if update.message.text == "❌ Cancel":
+        update.message.reply_text(
+            "Operation cancelled.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    
     try:
-        user_id = int(update.message.text.split()[0])
+        # Extract user_id from the button text (format: "Name (user_id)")
+        user_id = int(update.message.text.split("(")[-1].strip(")"))
         context.user_data['target_user_id'] = user_id
+        context.user_data['worker_name'] = update.message.text.split(" (")[0]
+        
+        keyboard = [["❌ Cancel"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
         
         update.message.reply_text(
-            "Please enter the new monthly salary amount (e.g., 3500.00):"
+            f"Setting salary for: *{context.user_data['worker_name']}*\n"
+            "Please enter the new monthly salary amount (e.g., 3500.00):",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
         )
         return SALARY_ENTER_AMOUNT
-    except (ValueError, IndexError):
-        update.message.reply_text("❌ Please select a valid worker ID.")
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error in salary_select_driver: {str(e)}")
+        update.message.reply_text("❌ Please select a valid worker from the list.")
         return SALARY_SELECT_DRIVER
 
 def salary_enter_amount(update, context):
     """设置新的工资金额"""
+    if update.message.text == "❌ Cancel":
+        update.message.reply_text(
+            "Operation cancelled.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+        
     try:
         amount = float(update.message.text)
-        if amount <= 0:
-            update.message.reply_text("❌ Amount must be greater than 0.")
+        if amount < 0:
+            update.message.reply_text("❌ Salary amount cannot be negative.")
             return SALARY_ENTER_AMOUNT
         
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE drivers SET monthly_salary = %s WHERE user_id = %s",
-                    (amount, context.user_data['target_user_id'])
-                )
-                conn.commit()
-                
-                update.message.reply_text(
-                    f"✅ Monthly salary updated to RM {amount:.2f}"
-                )
-        finally:
-            release_db_connection(conn)
+        # Store amount in context for confirmation
+        context.user_data['new_salary'] = amount
         
-        context.user_data.clear()
-        return ConversationHandler.END
+        # Create confirmation keyboard
+        keyboard = [
+            ["✅ Confirm"],
+            ["❌ Cancel"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+        
+        # Show confirmation message
+        update.message.reply_text(
+            f"📝 *Salary Update Summary*\n\n"
+            f"Worker: *{context.user_data['worker_name']}*\n"
+            f"New Salary: RM {amount:.2f}\n\n"
+            "Please confirm this change:",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        return SALARY_CONFIRM
     except ValueError:
-        update.message.reply_text("❌ Please enter a valid number.")
+        update.message.reply_text(
+            "❌ Please enter a valid number (e.g., 3500.00)."
+        )
         return SALARY_ENTER_AMOUNT
+
+def salary_confirm(update, context):
+    """确认工资更新"""
+    if update.message.text == "❌ Cancel":
+        update.message.reply_text(
+            "Operation cancelled.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+        
+    if update.message.text != "✅ Confirm":
+        update.message.reply_text("Please either confirm or cancel the operation.")
+        return SALARY_CONFIRM
+        
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE drivers SET monthly_salary = %s WHERE user_id = %s",
+                (context.user_data['new_salary'], context.user_data['target_user_id'])
+            )
+            conn.commit()
+            
+            update.message.reply_text(
+                f"✅ Salary updated successfully!\n\n"
+                f"Worker: *{context.user_data['worker_name']}*\n"
+                f"New Salary: RM {context.user_data['new_salary']:.2f}",
+                reply_markup=ReplyKeyboardRemove(),
+                parse_mode='Markdown'
+            )
+    except Exception as e:
+        logger.error(f"Error in salary_confirm: {str(e)}")
+        update.message.reply_text(
+            "❌ An error occurred while updating the salary. Please try again.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+    finally:
+        release_db_connection(conn)
+        context.user_data.clear()
+        
+    return ConversationHandler.END
 
 def claim_start(update, context):
     """开始报销流程"""
