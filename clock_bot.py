@@ -1254,16 +1254,32 @@ def checkstate_select_user(update, context):
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 获取基本信息
+                # 获取基本信息和工作时间
                 cur.execute(
-                    """SELECT d.monthly_salary, d.total_hours,
-                          COALESCE(SUM(c.amount) FILTER (WHERE c.status = 'approved'), 0) as approved_claims,
-                          COALESCE(SUM(c.amount) FILTER (WHERE c.status = 'pending'), 0) as pending_claims
-                       FROM drivers d
-                       LEFT JOIN claims c ON d.user_id = c.user_id
-                       WHERE d.user_id = %s
-                       GROUP BY d.user_id, d.monthly_salary, d.total_hours""",
-                    (user_id,)
+                    """WITH monthly_work AS (
+                        SELECT 
+                            CASE 
+                                WHEN is_off = TRUE THEN 0
+                                WHEN clock_out IS NULL OR clock_in IS NULL THEN 0
+                                WHEN clock_in = 'OFF' OR clock_out = 'OFF' THEN 0
+                                ELSE EXTRACT(EPOCH FROM (clock_out::timestamp - clock_in::timestamp))/3600
+                            END as daily_hours
+                        FROM clock_logs 
+                        WHERE user_id = %s 
+                        AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                    )
+                    SELECT 
+                        d.first_name,
+                        d.monthly_salary,
+                        d.total_hours,
+                        COALESCE(SUM(c.amount), 0) as total_claims,
+                        COALESCE(SUM(mw.daily_hours), 0) as month_hours
+                    FROM drivers d
+                    LEFT JOIN claims c ON d.user_id = c.user_id
+                    LEFT JOIN monthly_work mw ON 1=1
+                    WHERE d.user_id = %s
+                    GROUP BY d.user_id, d.first_name, d.monthly_salary, d.total_hours""",
+                    (user_id, user_id)
                 )
                 result = cur.fetchone()
                 
@@ -1274,26 +1290,29 @@ def checkstate_select_user(update, context):
                     )
                     return ConversationHandler.END
                 
-                monthly_salary, total_hours, approved_claims, pending_claims = result
+                name, monthly_salary, total_hours, total_claims, month_hours = result
                 
                 # 获取本月工作天数
                 cur.execute(
-                    """SELECT COUNT(DISTINCT date) 
-                       FROM clock_logs 
-                       WHERE user_id = %s 
-                       AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
-                       AND is_off = FALSE""",
+                    """SELECT 
+                        COUNT(DISTINCT date) as work_days,
+                        COUNT(DISTINCT CASE WHEN is_off THEN date END) as off_days
+                    FROM clock_logs 
+                    WHERE user_id = %s 
+                    AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
                     (user_id,)
                 )
-                work_days = cur.fetchone()[0] or 0
+                work_stats = cur.fetchone()
+                work_days, off_days = work_stats if work_stats else (0, 0)
                 
                 message = [
-                    "📊 Worker Status\n",
-                    f"Monthly Salary: RM {monthly_salary:.2f}",
-                    f"Total Work Hours: {format_duration(total_hours)}",
-                    f"This Month Work Days: {work_days} days",
-                    f"Approved Claims: RM {approved_claims:.2f}",
-                    f"Pending Claims: RM {pending_claims:.2f}"
+                    f"📊 Worker Status: {name}\n",
+                    f"💰 Monthly Salary: RM {monthly_salary:.2f}",
+                    f"⏰ Total Work Hours (All time): {format_duration(total_hours)}",
+                    f"⏰ This Month Hours: {format_duration(month_hours)}",
+                    f"📅 This Month Work Days: {work_days} days",
+                    f"🏖 This Month Off Days: {off_days} days",
+                    f"💵 Total Claims: RM {total_claims:.2f}"
                 ]
                 
                 update.message.reply_text(
