@@ -519,15 +519,9 @@ def generate_driver_pdf(driver_id, driver_name, bot, output_path):
 def get_timezone_from_location(latitude, longitude):
     """根据经纬度获取时区"""
     try:
-        # 从环境变量获取API密钥
-        api_key = os.getenv('GOOGLE_API_KEY')
-        if not api_key:
-            logger.error("GOOGLE_API_KEY not set in environment variables")
-            return DEFAULT_TIMEZONE
-            
         timestamp = int(time.time())
-        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={api_key}"
-        response = requests.get(url, timeout=5)
+        url = f"https://maps.googleapis.com/maps/api/timezone/json?location={latitude},{longitude}&timestamp={timestamp}&key={GOOGLE_API_KEY}"
+        response = requests.get(url)
         data = response.json()
         
         if data['status'] == 'OK':
@@ -560,100 +554,61 @@ def update_user_timezone(user_id, latitude, longitude):
 def handle_location(update, context):
     """处理用户发送的位置信息"""
     try:
+        # 检查是否在等待位置信息
         if not context.user_data.get('location_pending'):
             return
 
         user = update.effective_user
         location = update.message.location
         lat, lng = location.latitude, location.longitude
-        address = "Unknown"
-
+        time_str = context.user_data.get('clockin_time', 'N/A')
+        
+        # 获取地址
         try:
-            # 从环境变量获取API密钥
             api_key = os.getenv('GOOGLE_API_KEY')
-            if not api_key:
-                logger.error("GOOGLE_API_KEY not set in environment variables")
-                address = "API key not available"
+            response = requests.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={"latlng": f"{lat},{lng}", "key": api_key},
+                timeout=5
+            )
+            data = response.json()
+            if data.get("status") == "OK" and data.get("results"):
+                address = data["results"][0]["formatted_address"]
             else:
-                resp = requests.get(
-                    "https://maps.googleapis.com/maps/api/geocode/json",
-                    params={"latlng": f"{lat},{lng}", "key": api_key},
-                    timeout=5
-                )
-                data = resp.json()
-                if data.get("status") == "OK" and data.get("results"):
-                    address = data["results"][0]["formatted_address"]
+                address = "Location lookup failed"
         except Exception as e:
             logger.error(f"Error getting address: {e}")
             address = "Location lookup failed"
-
-        # 更新打卡记录中的地址
-        today = get_current_date_for_user(user.id)
+        
+        # 更新数据库中的地址
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE clock_logs SET location_address = %s WHERE user_id = %s AND date = %s",
-                    (address, user.id, today)
+                    (address, user.id, get_current_date_for_user(user.id))
                 )
                 conn.commit()
         finally:
             release_db_connection(conn)
-
-        # 显示带地址的打卡确认
-        time_str = context.user_data.get('clockin_time', 'N/A')
+        
+        # 显示打卡确认消息
         update.message.reply_text(
             f"✅ Clocked in at {time_str}\n"
-            f"📍 Location: {address}",
+            "📍 Location: {address}",
             reply_markup=ReplyKeyboardRemove()
         )
-
+        
         # 清理状态
         context.user_data.pop('clockin_time', None)
         context.user_data.pop('location_pending', None)
-
+            
     except Exception as e:
         logger.error(f"Error in handle_location: {e}")
         update.message.reply_text(
-            "❌ Failed to process your location. Please try again later.",
+            "❌ 处理位置信息失败，请重试",
             reply_markup=ReplyKeyboardRemove()
         )
-
-def handle_text_after_clockin(update, context):
-    """处理打卡后的文本消息（处理拒绝位置的情况）"""
-    try:
-        if not context.user_data.get('location_pending'):
-            return
-
-        user = update.effective_user
-        time_str = context.user_data.get('clockin_time', 'N/A')
-        
-        # 更新打卡记录为拒绝位置
-        today = get_current_date_for_user(user.id)
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE clock_logs SET location_address = 'refused' "
-                    "WHERE user_id = %s AND date = %s",
-                    (user.id, today)
-                )
-                conn.commit()
-        finally:
-            release_db_connection(conn)
-        
-        # 显示拒绝位置的消息
-        update.message.reply_text(
-            f"✅ Clocked in at {time_str}\n"
-            "⚠️ Refused to share location",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        # 清理状态
-        context.user_data.pop('clockin_time', None)
-        context.user_data.pop('location_pending', None)
-    except Exception as e:
-        logger.error(f"Error in handle_text_after_clockin: {e}")
 
 # === 命令处理函数 ===
 def start(update, context):
@@ -691,48 +646,12 @@ def clockin(update, context):
     """处理打卡命令"""
     try:
         user = update.effective_user
-        message = update.message
-        now_utc = datetime.datetime.now(pytz.UTC)
+        now = get_current_time_for_user(user.id)
+        today = now.date()
+        clock_time = now.astimezone(pytz.UTC)
+        time_str = format_local_time(now)
         
-        # 获取用户当前时区
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT timezone FROM drivers WHERE user_id = %s", (user.id,))
-                result = cur.fetchone()
-                current_timezone = result[0] if result else DEFAULT_TIMEZONE
-        finally:
-            release_db_connection(conn)
-
-        # 如果消息包含位置信息，更新用户时区
-        if message.location:
-            lat = message.location.latitude
-            lon = message.location.longitude
-            new_timezone = get_timezone_from_location(lat, lon)
-            
-            # 更新用户时区
-            conn = get_db_connection()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE drivers SET timezone = %s WHERE user_id = %s",
-                        (new_timezone, user.id)
-                    )
-                    conn.commit()
-            finally:
-                release_db_connection(conn)
-                
-            current_timezone = new_timezone
-            location_info = f"\n📍 时区自动识别：{new_timezone}"
-        else:
-            location_info = f"\n⚠️ 使用已存储时区：{current_timezone}"
-
-        # 转换为用户时区的时间
-        user_tz = pytz.timezone(current_timezone)
-        now_local = now_utc.astimezone(user_tz)
-        today = now_local.date()
-        
-        # 保存打卡记录
+        # 保存打卡记录到数据库
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
@@ -744,37 +663,36 @@ def clockin(update, context):
                 if cur.fetchone():
                     # 更新记录
                     cur.execute(
-                        "UPDATE clock_logs SET clock_in = %s, is_off = FALSE WHERE user_id = %s AND date = %s",
-                        (now_utc, user.id, today)
+                        "UPDATE clock_logs SET clock_in = %s, is_off = FALSE, location_address = NULL WHERE user_id = %s AND date = %s",
+                        (clock_time, user.id, today)
                     )
                 else:
                     # 插入新记录
                     cur.execute(
                         "INSERT INTO clock_logs (user_id, date, clock_in) VALUES (%s, %s, %s)",
-                        (user.id, today, now_utc)
+                        (user.id, today, clock_time)
                     )
                 conn.commit()
         finally:
             release_db_connection(conn)
 
-        # 发送打卡成功消息
-        time_str = now_local.strftime("%Y-%m-%d %H:%M:%S")
-        update.message.reply_text(f"✅ 打卡成功：{time_str}{location_info}")
+        # 先发送打卡成功消息
+        update.message.reply_text(f"✅ Clocked in at {time_str}")
         
-        # 请求位置（如果没有提供）
-        if not message.location:
-            location_button = KeyboardButton("📍 Share Location", request_location=True)
-            reply_markup = ReplyKeyboardMarkup([[location_button]], resize_keyboard=True, one_time_keyboard=True)
-            update.message.reply_text(
-                "Please share your location for timezone verification:",
-                reply_markup=reply_markup
-            )
-            context.user_data['location_pending'] = True
-            context.user_data['clockin_time'] = time_str
-            
+        # 保存状态用于后续位置处理
+        context.user_data['clockin_time'] = time_str
+        context.user_data['location_pending'] = True
+        
+        # 请求位置
+        location_button = KeyboardButton("📍 Share Location", request_location=True)
+        reply_markup = ReplyKeyboardMarkup([[location_button]], resize_keyboard=True, one_time_keyboard=True)
+        update.message.reply_text(
+            "Please share your location for address verification:",
+            reply_markup=reply_markup
+        )
     except Exception as e:
         logger.error(f"Error in clockin: {str(e)}")
-        update.message.reply_text("❌ An error occurred while clocking in. Please try again.")
+        update.message.reply_text("❌ 打卡失败，请重试")
 
 def clockout(update, context):
     try:
@@ -1543,3 +1461,40 @@ def get_address_from_location(latitude, longitude):
     except Exception as e:
         logger.error(f"Error in get_address_from_location: {e}")
         return "Address lookup failed"
+
+# === 添加拒绝位置的处理 ===
+def handle_text_after_clockin(update, context):
+    """处理打卡后的文本消息（处理拒绝位置的情况）"""
+    try:
+        # 检查是否在等待位置信息
+        if not context.user_data.get('location_pending'):
+            return
+            
+        user = update.effective_user
+        time_str = context.user_data.get('clockin_time', 'N/A')
+        
+        # 更新数据库，标记为拒绝位置
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE clock_logs SET location_address = 'refused' "
+                    "WHERE user_id = %s AND date = %s",
+                    (user.id, get_current_date_for_user(user.id))
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+        
+        # 显示打卡确认消息
+        update.message.reply_text(
+            f"✅ Clocked in at {time_str}\n"
+            "⚠️ Refused to share location",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        # 清理状态
+        context.user_data.pop('clockin_time', None)
+        context.user_data.pop('location_pending', None)
+    except Exception as e:
+        logger.error(f"Error in handle_text_after_clockin: {e}")
