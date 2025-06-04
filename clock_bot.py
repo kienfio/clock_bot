@@ -3,7 +3,7 @@ from telegram import (
     Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
 )
 from telegram.ext import (
-    Dispatcher, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackQueryHandler
+    Dispatcher, CommandHandler, MessageHandler, Filters, ConversationHandler, CallbackQueryHandler, CallbackContext
 )
 import datetime
 import pytz
@@ -1499,4 +1499,12 @@ def get_address_from_location(latitude, longitude):
             return "Address not available"
     except Exception as e:
         logger.error(f"Error in get_address_from_location: {e}")
-        return "Address lookup failed"
+        return "Address lookup failed" 
+
+def test_location(update: Update, context: CallbackContext):
+    button = KeyboardButton("📍 Share Location", request_location=True)
+    reply_markup = ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+    update.message.reply_text("Test: Please share your location:", reply_markup=reply_markup)
+
+# 添加 handler
+dispatcher.add_handler(CommandHandler("testloc", test_location))
