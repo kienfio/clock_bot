@@ -288,6 +288,43 @@ def init_db():
                 )
                 """)
                 
+                # 添加报销记录表
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS claims (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES drivers(user_id),
+                    type TEXT NOT NULL,
+                    amount FLOAT NOT NULL,
+                    date DATE NOT NULL,
+                    photo_file_id TEXT,
+                    status TEXT DEFAULT 'PENDING',
+                    paid_date TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+                
+                # 确保 claims 表中的 status 和 paid_date 列存在
+                cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='claims' AND column_name='status'
+                    ) THEN
+                        ALTER TABLE claims ADD COLUMN status TEXT DEFAULT 'PENDING';
+                    END IF;
+                    
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='claims' AND column_name='paid_date'
+                    ) THEN
+                        ALTER TABLE claims ADD COLUMN paid_date TIMESTAMP WITH TIME ZONE;
+                    END IF;
+                END $$;
+                """)
+                
                 # 确保 location_address 列存在
                 cur.execute("""
                 DO $$
@@ -486,10 +523,32 @@ def clockin(update, context):
         update.message.reply_text("❌ An error occurred. Please try again or contact admin.")
         return ConversationHandler.END
 
+def fix_claims_data():
+    """修复 claims 表中的数据，确保所有记录都有正确的状态"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 将所有 NULL 状态的记录更新为 'PENDING'
+            cur.execute(
+                """UPDATE claims 
+                   SET status = 'PENDING' 
+                   WHERE status IS NULL"""
+            )
+            rows_updated = cur.rowcount
+            conn.commit()
+            logger.info(f"Fixed {rows_updated} claims records with NULL status")
+    except Exception as e:
+        logger.error(f"Error fixing claims data: {str(e)}")
+    finally:
+        release_db_connection(conn)
+
 def init_bot():
     """初始化 Telegram Bot 和 Dispatcher"""
     global dispatcher
     dispatcher = Dispatcher(bot, None, use_context=True)
+    
+    # 修复数据
+    fix_claims_data()
     
     # 注册命令处理器
     dispatcher.add_handler(CommandHandler("start", start))
@@ -965,13 +1024,14 @@ def claim_proof(update, context):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO claims (user_id, type, amount, date, photo_file_id)
-                   VALUES (%s, %s, %s, %s, %s)""",
+                """INSERT INTO claims (user_id, type, amount, date, photo_file_id, status)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (user.id, 
                  context.user_data['claim_type'],
                  context.user_data['claim_amount'],
                  datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date(),
-                 photo.file_id)
+                 photo.file_id,
+                 'PENDING')
             )
             conn.commit()
             
