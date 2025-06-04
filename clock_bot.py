@@ -658,48 +658,267 @@ def error_handler(update, context):
         logger.error(f"Error in error handler: {str(e)}")
 
 def salary_start(update, context):
-    # Implementation of salary_start function
-    pass
+    """开始设置工资流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id, first_name, monthly_salary FROM drivers")
+            drivers = cur.fetchall()
+            
+            if not drivers:
+                update.message.reply_text("No drivers found.")
+                return ConversationHandler.END
+            
+            message = ["Select a worker to set salary:"]
+            for driver in drivers:
+                user_id, name, salary = driver
+                message.append(f"\n{user_id} - {name} (Current: RM {salary:.2f})")
+            
+            update.message.reply_text("\n".join(message))
+            return SALARY_SELECT_DRIVER
+    except Exception as e:
+        logger.error(f"Error in salary_start: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
 
 def salary_select_driver(update, context):
-    # Implementation of salary_select_driver function
-    pass
+    """选择要设置工资的司机"""
+    try:
+        user_id = int(update.message.text.split()[0])
+        context.user_data['target_user_id'] = user_id
+        
+        update.message.reply_text(
+            "Please enter the new monthly salary amount (e.g., 3500.00):"
+        )
+        return SALARY_ENTER_AMOUNT
+    except (ValueError, IndexError):
+        update.message.reply_text("❌ Please select a valid worker ID.")
+        return SALARY_SELECT_DRIVER
 
 def salary_enter_amount(update, context):
-    # Implementation of salary_enter_amount function
-    pass
+    """设置新的工资金额"""
+    try:
+        amount = float(update.message.text)
+        if amount <= 0:
+            update.message.reply_text("❌ Amount must be greater than 0.")
+            return SALARY_ENTER_AMOUNT
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE drivers SET monthly_salary = %s WHERE user_id = %s",
+                    (amount, context.user_data['target_user_id'])
+                )
+                conn.commit()
+                
+                update.message.reply_text(
+                    f"✅ Monthly salary updated to RM {amount:.2f}"
+                )
+        finally:
+            release_db_connection(conn)
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except ValueError:
+        update.message.reply_text("❌ Please enter a valid number.")
+        return SALARY_ENTER_AMOUNT
 
 def topup_start(update, context):
-    # Implementation of topup_start function
-    pass
+    """开始充值流程"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ This command is only available for admins.")
+        return ConversationHandler.END
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id, first_name, balance FROM drivers")
+            drivers = cur.fetchall()
+            
+            if not drivers:
+                update.message.reply_text("No workers found.")
+                return ConversationHandler.END
+            
+            message = ["Select a worker to top up:"]
+            for driver in drivers:
+                user_id, name, balance = driver
+                message.append(f"\n{user_id} - {name} (Balance: RM {balance:.2f})")
+            
+            update.message.reply_text("\n".join(message))
+            return TOPUP_USER
+    except Exception as e:
+        logger.error(f"Error in topup_start: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
 
 def topup_user(update, context):
-    # Implementation of topup_user function
-    pass
+    """选择要充值的用户"""
+    try:
+        user_id = int(update.message.text.split()[0])
+        context.user_data['target_user_id'] = user_id
+        
+        update.message.reply_text(
+            "Please enter the top up amount (e.g., 100.00):"
+        )
+        return TOPUP_AMOUNT
+    except (ValueError, IndexError):
+        update.message.reply_text("❌ Please select a valid worker ID.")
+        return TOPUP_USER
 
 def topup_amount(update, context):
-    # Implementation of topup_amount function
-    pass
+    """处理充值金额"""
+    try:
+        amount = float(update.message.text)
+        if amount <= 0:
+            update.message.reply_text("❌ Amount must be greater than 0.")
+            return TOPUP_AMOUNT
+        
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # 更新余额
+                cur.execute(
+                    "UPDATE drivers SET balance = balance + %s WHERE user_id = %s",
+                    (amount, context.user_data['target_user_id'])
+                )
+                
+                # 记录充值
+                cur.execute(
+                    """INSERT INTO topups (user_id, amount, date, admin_id)
+                       VALUES (%s, %s, %s, %s)""",
+                    (context.user_data['target_user_id'],
+                     amount,
+                     datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date(),
+                     update.effective_user.id)
+                )
+                conn.commit()
+                
+                # 获取新余额
+                cur.execute(
+                    "SELECT balance FROM drivers WHERE user_id = %s",
+                    (context.user_data['target_user_id'],)
+                )
+                new_balance = cur.fetchone()[0]
+                
+                update.message.reply_text(
+                    f"✅ Top up successful!\n"
+                    f"Amount: RM {amount:.2f}\n"
+                    f"New Balance: RM {new_balance:.2f}"
+                )
+        finally:
+            release_db_connection(conn)
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except ValueError:
+        update.message.reply_text("❌ Please enter a valid number.")
+        return TOPUP_AMOUNT
 
 def claim_start(update, context):
-    # Implementation of claim_start function
-    pass
+    """开始报销流程"""
+    user = update.effective_user
+    keyboard = [
+        ['🍱 Meal', '🚗 Transport'],
+        ['🏥 Medical', '📱 Phone'],
+        ['🛠 Tools', '👔 Uniform'],
+        ['Other']
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+    update.message.reply_text(
+        "Please select claim type:",
+        reply_markup=reply_markup
+    )
+    return CLAIM_TYPE
 
 def claim_type(update, context):
-    # Implementation of claim_type function
-    pass
+    """处理报销类型选择"""
+    claim_type = update.message.text
+    if claim_type == 'Other':
+        update.message.reply_text(
+            "Please specify the claim type:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CLAIM_OTHER_TYPE
+    
+    context.user_data['claim_type'] = claim_type
+    update.message.reply_text(
+        "Please enter the claim amount (e.g., 50.00):",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return CLAIM_AMOUNT
 
 def claim_other_type(update, context):
-    # Implementation of claim_other_type function
-    pass
+    """处理其他类型的报销"""
+    claim_type = update.message.text
+    context.user_data['claim_type'] = claim_type
+    update.message.reply_text(
+        "Please enter the claim amount (e.g., 50.00):",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return CLAIM_AMOUNT
 
 def claim_amount(update, context):
-    # Implementation of claim_amount function
-    pass
+    """处理报销金额"""
+    try:
+        amount = float(update.message.text)
+        if amount <= 0:
+            update.message.reply_text("❌ Amount must be greater than 0.")
+            return CLAIM_AMOUNT
+        
+        context.user_data['claim_amount'] = amount
+        update.message.reply_text(
+            "Please send a photo of the receipt/proof:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return CLAIM_PROOF
+    except ValueError:
+        update.message.reply_text("❌ Please enter a valid number.")
+        return CLAIM_AMOUNT
 
 def claim_proof(update, context):
-    # Implementation of claim_proof function
-    pass
+    """处理报销凭证"""
+    user = update.effective_user
+    photo = update.message.photo[-1]
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO claims (user_id, type, amount, date, photo_file_id)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (user.id, 
+                 context.user_data['claim_type'],
+                 context.user_data['claim_amount'],
+                 datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date(),
+                 photo.file_id)
+            )
+            conn.commit()
+            
+            update.message.reply_text(
+                f"✅ Claim submitted:\n"
+                f"Type: {context.user_data['claim_type']}\n"
+                f"Amount: RM {context.user_data['claim_amount']:.2f}\n"
+                "Status: Pending approval"
+            )
+    except Exception as e:
+        logger.error(f"Error in claim_proof: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+    finally:
+        release_db_connection(conn)
+    
+    context.user_data.clear()
+    return ConversationHandler.END
 
 def paid_start(update, context):
     # Implementation of paid_start function
@@ -726,12 +945,82 @@ def pdf_button_callback(update, context):
     pass
 
 def viewclaims(update, context):
-    # Implementation of viewclaims function
-    pass
+    """查看报销记录"""
+    user = update.effective_user
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT type, amount, date, status 
+                   FROM claims 
+                   WHERE user_id = %s 
+                   ORDER BY date DESC 
+                   LIMIT 5""",
+                (user.id,)
+            )
+            claims = cur.fetchall()
+            
+            if not claims:
+                update.message.reply_text("📝 No claims found.")
+                return
+            
+            message = ["📋 Recent Claims:"]
+            for claim in claims:
+                claim_type, amount, date, status = claim
+                message.append(
+                    f"\n{date.strftime('%Y-%m-%d')}"
+                    f"\nType: {claim_type}"
+                    f"\nAmount: RM {amount:.2f}"
+                    f"\nStatus: {status}"
+                    f"\n{'-'*20}"
+                )
+            
+            update.message.reply_text("".join(message))
+    except Exception as e:
+        logger.error(f"Error in viewclaims: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+    finally:
+        release_db_connection(conn)
 
 def balance(update, context):
-    # Implementation of balance function
-    pass
+    """查看余额"""
+    user = update.effective_user
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT balance, monthly_salary, total_hours FROM drivers WHERE user_id = %s",
+                (user.id,)
+            )
+            result = cur.fetchone()
+            
+            if not result:
+                update.message.reply_text("❌ User not found.")
+                return
+            
+            balance, monthly_salary, total_hours = result
+            
+            # 获取本月的报销总额
+            cur.execute(
+                """SELECT COALESCE(SUM(amount), 0) FROM claims 
+                   WHERE user_id = %s AND 
+                   date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
+                (user.id,)
+            )
+            claims_total = cur.fetchone()[0]
+            
+            update.message.reply_text(
+                f"💰 Balance Summary\n\n"
+                f"Current Balance: RM {balance:.2f}\n"
+                f"Monthly Salary: RM {monthly_salary:.2f}\n"
+                f"Total Hours: {format_duration(total_hours)}\n"
+                f"This Month Claims: RM {claims_total:.2f}"
+            )
+    except Exception as e:
+        logger.error(f"Error in balance: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again.")
+    finally:
+        release_db_connection(conn)
 
 def get_current_time():
     """获取当前时间（马来西亚时区）"""
