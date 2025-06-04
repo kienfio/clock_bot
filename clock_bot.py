@@ -513,3 +513,275 @@ def init_bot():
     dispatcher.add_error_handler(error_handler)
     
     logger.info("Bot handlers initialized successfully") 
+
+def start(update, context):
+    """处理 /start 命令"""
+    user = update.effective_user
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 检查用户是否已存在
+            cur.execute("SELECT * FROM drivers WHERE user_id = %s", (user.id,))
+            driver = cur.fetchone()
+            
+            if not driver:
+                # 创建新用户
+                cur.execute(
+                    """INSERT INTO drivers (user_id, username, first_name) 
+                       VALUES (%s, %s, %s)""",
+                    (user.id, user.username, user.first_name)
+                )
+                conn.commit()
+                welcome_msg = (
+                    f"👋 Welcome {user.first_name}!\n\n"
+                    "I'm your clock-in assistant. Here are the available commands:\n\n"
+                    "📍 /clockin - Clock in with location\n"
+                    "🏁 /clockout - Clock out\n"
+                    "📅 /check - Check today's record\n"
+                    "🏖 /offday - Mark today as off day"
+                )
+            else:
+                welcome_msg = (
+                    f"👋 Welcome back {user.first_name}!\n\n"
+                    "Available commands:\n\n"
+                    "📍 /clockin - Clock in with location\n"
+                    "🏁 /clockout - Clock out\n"
+                    "📅 /check - Check today's record\n"
+                    "🏖 /offday - Mark today as off day"
+                )
+    except Exception as e:
+        logger.error(f"Error in start command: {str(e)}")
+        welcome_msg = "❌ An error occurred. Please try again or contact admin."
+    finally:
+        release_db_connection(conn)
+    
+    update.message.reply_text(welcome_msg)
+
+def check(update, context):
+    """检查今天的打卡记录"""
+    user = update.effective_user
+    now = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
+    today = now.date()
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT clock_in, clock_out, is_off, location_address 
+                   FROM clock_logs 
+                   WHERE user_id = %s AND date = %s""",
+                (user.id, today)
+            )
+            log = cur.fetchone()
+            
+            if not log:
+                update.message.reply_text("📝 No records for today.")
+                return
+            
+            clock_in, clock_out, is_off, location = log
+            
+            if is_off:
+                update.message.reply_text("🏖 Today is marked as off day.")
+                return
+            
+            status = []
+            if clock_in and clock_in != "OFF":
+                status.append(f"Clock in: {clock_in}")
+                if location:
+                    status.append(f"📍 Location: {location}")
+            if clock_out:
+                status.append(f"Clock out: {clock_out}")
+            
+            if status:
+                update.message.reply_text("\n".join(["📝 Today's Record:"] + status))
+            else:
+                update.message.reply_text("📝 No clock in/out records for today.")
+                
+    except Exception as e:
+        logger.error(f"Error in check command: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact admin.")
+    finally:
+        release_db_connection(conn)
+
+def offday(update, context):
+    """标记今天为休息日"""
+    user = update.effective_user
+    now = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
+    today = now.date()
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 检查是否已有记录
+            cur.execute(
+                "SELECT clock_in, clock_out FROM clock_logs WHERE user_id = %s AND date = %s",
+                (user.id, today)
+            )
+            log = cur.fetchone()
+            
+            if log and (log[0] not in [None, "OFF"] or log[1]):
+                update.message.reply_text("❌ Cannot mark as off day - already have clock records for today.")
+                return
+            
+            # 更新或插入休息日记录
+            if log:
+                cur.execute(
+                    """UPDATE clock_logs 
+                       SET clock_in = 'OFF', clock_out = NULL, is_off = TRUE 
+                       WHERE user_id = %s AND date = %s""",
+                    (user.id, today)
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO clock_logs (user_id, date, clock_in, is_off) 
+                       VALUES (%s, %s, 'OFF', TRUE)""",
+                    (user.id, today)
+                )
+            conn.commit()
+            
+            update.message.reply_text("🏖 Today has been marked as off day.")
+            
+    except Exception as e:
+        logger.error(f"Error in offday command: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact admin.")
+    finally:
+        release_db_connection(conn)
+
+def cancel(update, context):
+    """取消当前操作"""
+    update.message.reply_text(
+        "Operation cancelled.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+def error_handler(update, context):
+    """处理错误"""
+    logger.error(f"Error: {context.error}")
+    try:
+        if update and update.effective_message:
+            update.effective_message.reply_text(
+                "❌ An error occurred. Please try again or contact admin."
+            )
+    except Exception as e:
+        logger.error(f"Error in error handler: {str(e)}")
+
+def salary_start(update, context):
+    # Implementation of salary_start function
+    pass
+
+def salary_select_driver(update, context):
+    # Implementation of salary_select_driver function
+    pass
+
+def salary_enter_amount(update, context):
+    # Implementation of salary_enter_amount function
+    pass
+
+def topup_start(update, context):
+    # Implementation of topup_start function
+    pass
+
+def topup_user(update, context):
+    # Implementation of topup_user function
+    pass
+
+def topup_amount(update, context):
+    # Implementation of topup_amount function
+    pass
+
+def claim_start(update, context):
+    # Implementation of claim_start function
+    pass
+
+def claim_type(update, context):
+    # Implementation of claim_type function
+    pass
+
+def claim_other_type(update, context):
+    # Implementation of claim_other_type function
+    pass
+
+def claim_amount(update, context):
+    # Implementation of claim_amount function
+    pass
+
+def claim_proof(update, context):
+    # Implementation of claim_proof function
+    pass
+
+def paid_start(update, context):
+    # Implementation of paid_start function
+    pass
+
+def paid_select_driver(update, context):
+    # Implementation of paid_select_driver function
+    pass
+
+def paid_start_date(update, context):
+    # Implementation of paid_start_date function
+    pass
+
+def paid_end_date(update, context):
+    # Implementation of paid_end_date function
+    pass
+
+def pdf_start(update, context):
+    # Implementation of pdf_start function
+    pass
+
+def pdf_button_callback(update, context):
+    # Implementation of pdf_button_callback function
+    pass
+
+def viewclaims(update, context):
+    # Implementation of viewclaims function
+    pass
+
+def balance(update, context):
+    # Implementation of balance function
+    pass
+
+def get_current_time():
+    """获取当前时间（马来西亚时区）"""
+    return datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur'))
+
+def format_duration(hours):
+    """格式化工作时长"""
+    hours = round(hours, 2)
+    if hours == int(hours):
+        return f"{int(hours)}h"
+    return f"{hours}h"
+
+def format_local_time(datetime_str):
+    """格式化本地时间显示"""
+    try:
+        if isinstance(datetime_str, str):
+            dt = datetime.datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
+        else:
+            dt = datetime_str
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except Exception as e:
+        logger.error(f"Error formatting time: {str(e)}")
+        return datetime_str
+
+def get_address_from_location(latitude, longitude):
+    """根据经纬度获取地址"""
+    try:
+        GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+        if not GOOGLE_API_KEY:
+            logger.error("GOOGLE_API_KEY not set in environment variables")
+            return "Location details not available"
+            
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={latitude},{longitude}&key={GOOGLE_API_KEY}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['status'] == 'OK' and data['results']:
+            return data['results'][0]['formatted_address']
+        else:
+            logger.error(f"Error getting address: {data}")
+            return "Address not available"
+    except Exception as e:
+        logger.error(f"Error in get_address_from_location: {str(e)}")
+        return "Address lookup failed" 
