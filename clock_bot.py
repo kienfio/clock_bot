@@ -421,7 +421,41 @@ def handle_location(update, context):
 
 def clockin(update, context):
     """启动打卡流程"""
-    return request_location(update, context)
+    try:
+        user = update.effective_user
+        logger.info(f"User {user.id} ({user.first_name}) requested clock in")
+        
+        # 首先确认用户存在于数据库中
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id FROM drivers WHERE user_id = %s", (user.id,))
+                driver = cur.fetchone()
+                
+                if not driver:
+                    # 如果用户不存在，先创建用户
+                    cur.execute(
+                        """INSERT INTO drivers (user_id, username, first_name) 
+                           VALUES (%s, %s, %s)""",
+                        (user.id, user.username, user.first_name)
+                    )
+                    conn.commit()
+                    logger.info(f"Created new user: {user.id} ({user.first_name})")
+        finally:
+            release_db_connection(conn)
+        
+        # 请求位置
+        keyboard = [[KeyboardButton(text="📍 Share Location", request_location=True)]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        update.message.reply_text(
+            "Please share your location to clock in.",
+            reply_markup=reply_markup
+        )
+        return "WAITING_LOCATION"
+    except Exception as e:
+        logger.error(f"Error in clockin: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact admin.")
+        return ConversationHandler.END
 
 def init_bot():
     """初始化 Telegram Bot 和 Dispatcher"""
@@ -1250,49 +1284,34 @@ def checkstate_select_user(update, context):
         return nav_result
         
     try:
+        # 记录日志，帮助调试
+        logger.info(f"checkstate_select_user received text: '{update.message.text}'")
+        
         user_id = int(update.message.text.split()[0])
+        logger.info(f"Attempting to get status for user_id: {user_id}")
+        
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 获取基本信息和工作时间
+                # 获取基本信息
                 cur.execute(
-                    """WITH monthly_work AS (
-                        SELECT 
-                            CASE 
-                                WHEN is_off = TRUE THEN 0
-                                WHEN clock_out IS NULL OR clock_in IS NULL THEN 0
-                                WHEN clock_in = 'OFF' OR clock_out = 'OFF' THEN 0
-                                ELSE EXTRACT(EPOCH FROM (clock_out::timestamp - clock_in::timestamp))/3600
-                            END as daily_hours
-                        FROM clock_logs 
-                        WHERE user_id = %s 
-                        AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
-                    )
-                    SELECT 
-                        d.first_name,
-                        d.monthly_salary,
-                        d.total_hours,
-                        COALESCE(SUM(c.amount), 0) as total_claims,
-                        COALESCE(SUM(mw.daily_hours), 0) as month_hours
-                    FROM drivers d
-                    LEFT JOIN claims c ON d.user_id = c.user_id
-                    LEFT JOIN monthly_work mw ON 1=1
-                    WHERE d.user_id = %s
-                    GROUP BY d.user_id, d.first_name, d.monthly_salary, d.total_hours""",
-                    (user_id, user_id)
+                    """SELECT first_name, monthly_salary, total_hours 
+                       FROM drivers 
+                       WHERE user_id = %s""",
+                    (user_id,)
                 )
-                result = cur.fetchone()
+                basic_info = cur.fetchone()
                 
-                if not result:
+                if not basic_info:
                     update.message.reply_text(
                         "❌ Worker not found.",
                         reply_markup=ReplyKeyboardRemove()
                     )
                     return ConversationHandler.END
                 
-                name, monthly_salary, total_hours, total_claims, month_hours = result
+                name, monthly_salary, total_hours = basic_info
                 
-                # 获取本月工作天数
+                # 获取本月工作天数和休息日
                 cur.execute(
                     """SELECT 
                         COUNT(DISTINCT date) as work_days,
@@ -1302,8 +1321,42 @@ def checkstate_select_user(update, context):
                     AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
                     (user_id,)
                 )
-                work_stats = cur.fetchone()
-                work_days, off_days = work_stats if work_stats else (0, 0)
+                work_stats = cur.fetchone() or (0, 0)
+                work_days, off_days = work_stats
+                
+                # 获取本月工作时长
+                cur.execute(
+                    """SELECT SUM(
+                        CASE 
+                            WHEN is_off = TRUE THEN 0
+                            WHEN clock_out IS NULL OR clock_in IS NULL THEN 0
+                            WHEN clock_in = 'OFF' OR clock_out = 'OFF' THEN 0
+                            ELSE 
+                                EXTRACT(EPOCH FROM (
+                                    CASE WHEN clock_out ~ '^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$' AND 
+                                              clock_in ~ '^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$' 
+                                         THEN clock_out::timestamp - clock_in::timestamp
+                                         ELSE '0'::interval
+                                    END
+                                ))/3600
+                        END
+                    ) as month_hours
+                    FROM clock_logs 
+                    WHERE user_id = %s 
+                    AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
+                    (user_id,)
+                )
+                month_hours_result = cur.fetchone()
+                month_hours = month_hours_result[0] if month_hours_result and month_hours_result[0] else 0
+                
+                # 获取报销总额
+                cur.execute(
+                    """SELECT COALESCE(SUM(amount), 0) as total_claims
+                       FROM claims 
+                       WHERE user_id = %s""",
+                    (user_id,)
+                )
+                total_claims = cur.fetchone()[0] or 0
                 
                 message = [
                     f"📊 Worker Status: {name}\n",
@@ -1319,13 +1372,29 @@ def checkstate_select_user(update, context):
                     "\n".join(message),
                     reply_markup=ReplyKeyboardRemove()
                 )
+                logger.info(f"Successfully sent status for user {user_id}")
+                
+        except Exception as e:
+            logger.error(f"Database error in checkstate_select_user: {str(e)}")
+            update.message.reply_text(
+                "❌ Database error occurred. Please try again or contact admin.",
+                reply_markup=ReplyKeyboardRemove()
+            )
         finally:
             release_db_connection(conn)
         
         return ConversationHandler.END
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing user input in checkstate_select_user: {str(e)}")
         update.message.reply_text(
             "❌ Please select a valid worker.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Unexpected error in checkstate_select_user: {str(e)}")
+        update.message.reply_text(
+            "❌ An error occurred. Please try again or contact admin.",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
