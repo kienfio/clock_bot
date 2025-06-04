@@ -1631,6 +1631,19 @@ def checkstate_select_user(update, context):
                         except (ValueError, TypeError) as e:
                             logger.warning(f"Error parsing timestamps for date {date}: {e}")
                 
+                # 获取本月 OT 时长
+                cur.execute(
+                    """SELECT COALESCE(SUM(duration), 0) as total_ot_hours
+                       FROM ot_logs 
+                       WHERE user_id = %s 
+                       AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                       AND end_time IS NOT NULL""",
+                    (user_id,)
+                )
+                ot_hours = cur.fetchone()[0] or 0
+                ot_hours_int = int(ot_hours)
+                ot_minutes = int((ot_hours - ot_hours_int) * 60)
+                
                 # 获取报销总额
                 cur.execute(
                     """SELECT COALESCE(SUM(amount), 0) as total_claims
@@ -1645,6 +1658,7 @@ def checkstate_select_user(update, context):
                     f"💰 Monthly Salary: RM {monthly_salary:.2f}",
                     f"⏰ Total Work Hours (All time): {format_duration(total_hours)}",
                     f"⏰ This Month Hours: {format_duration(month_hours)}",
+                    f"🕒 This Month OT: {ot_hours_int}h {ot_minutes}m",
                     f"📅 This Month Work Days: {work_days} days",
                     f"🏖 This Month Off Days: {off_days} days",
                     f"💵 Total Claims: RM {total_claims:.2f}"
@@ -1679,7 +1693,7 @@ def checkstate_select_user(update, context):
             "❌ An error occurred. Please try again or contact admin.",
             reply_markup=ReplyKeyboardRemove()
         )
-        return ConversationHandler.END 
+        return ConversationHandler.END
 
 def ot(update, context):
     """处理 OT 命令"""
