@@ -464,18 +464,40 @@ def init_bot():
     
     # 注册命令处理器
     dispatcher.add_handler(CommandHandler("start", start))
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("clockin", clockin)],
-        states={
-            "WAITING_LOCATION": [MessageHandler(Filters.location, handle_location)]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    ))
-    dispatcher.add_handler(CommandHandler("clockout", clockout))
-    dispatcher.add_handler(CommandHandler("offday", offday))
-    dispatcher.add_handler(CommandHandler("checkstate", checkstate_start))
     
-    # 注册报销对话处理器
+    # 注册对话处理器（按照优先级顺序排列）
+    
+    # 1. 查看状态对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("checkstate", checkstate_start)],
+        states={
+            CHECKSTATE_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, checkstate_select_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 2. 查看打卡记录对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("viewclocking", viewclocking_start)],
+        states={
+            VIEWCLOCKING_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclocking_select_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 3. 查看报销记录对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("viewclaims", viewclaims_start)],
+        states={
+            VIEWCLAIMS_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 4. 报销对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("claim", claim_start)],
         states={
@@ -488,37 +510,7 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 注册查看报销记录对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("viewclaims", viewclaims_start)],
-        states={
-            VIEWCLAIMS_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_user)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    ))
-    
-    # 注册查看状态对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("checkstate", checkstate_start)],
-        states={
-            CHECKSTATE_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, checkstate_select_user)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    ))
-    
-    # 注册查看打卡记录对话处理器
-    dispatcher.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("viewclocking", viewclocking_start)],
-        states={
-            VIEWCLOCKING_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclocking_select_user)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
-    ))
-    
-    # 注册充值对话处理器
+    # 5. 充值对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("topup", topup_start)],
         states={
@@ -529,7 +521,7 @@ def init_bot():
         allow_reentry=True
     ))
     
-    # 注册设置工资对话处理器
+    # 6. 设置工资对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("salary", salary_start)],
         states={
@@ -539,6 +531,19 @@ def init_bot():
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True
     ))
+    
+    # 7. 打卡对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("clockin", clockin)],
+        states={
+            "WAITING_LOCATION": [MessageHandler(Filters.location, handle_location)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ))
+    
+    # 注册简单命令处理器
+    dispatcher.add_handler(CommandHandler("clockout", clockout))
+    dispatcher.add_handler(CommandHandler("offday", offday))
     
     # 注册错误处理器
     dispatcher.add_error_handler(error_handler)
