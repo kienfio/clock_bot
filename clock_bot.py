@@ -14,6 +14,7 @@ import tempfile
 import requests
 import calendar
 import psycopg2
+import psycopg2.extras
 from psycopg2 import pool
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -211,8 +212,7 @@ def init_db():
             'dsn': os.environ.get("DATABASE_URL"),
             'minconn': 1,
             'maxconn': 20,
-            'options': "-c timezone=Asia/Kuala_Lumpur",
-            'cursor_factory': psycopg2.extras.DictCursor
+            'options': "-c timezone=Asia/Kuala_Lumpur"
         }
         
         # 添加 SSL 配置
@@ -224,7 +224,7 @@ def init_db():
         
         conn = get_db_connection()
         try:
-            with conn.cursor() as cur:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 # 设置会话级别的时区
                 cur.execute("SET timezone TO 'Asia/Kuala_Lumpur'")
                 
@@ -241,7 +241,7 @@ def init_db():
                 )
                 """)
                 
-                # 打卡记录表 - 修改时间戳类型的处理
+                # 打卡记录表
                 cur.execute("""
                 CREATE TABLE IF NOT EXISTS clock_logs (
                     id SERIAL PRIMARY KEY,
@@ -269,40 +269,14 @@ def init_db():
                     END IF;
                 END $$;
                 """)
-                logger.info("确保 clock_logs 表存在 location_address 列")
                 
-                # 充值记录表
-                cur.execute("""
-                CREATE TABLE IF NOT EXISTS topups (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES drivers(user_id),
-                    amount FLOAT NOT NULL,
-                    date DATE NOT NULL,
-                    admin_id BIGINT,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-                """)
-                
-                # 报销记录表
-                cur.execute("""
-                CREATE TABLE IF NOT EXISTS claims (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT REFERENCES drivers(user_id),
-                    type TEXT NOT NULL,
-                    amount FLOAT NOT NULL,
-                    date DATE NOT NULL,
-                    photo_file_id TEXT,
-                    status TEXT DEFAULT 'pending',
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                )
-                """)
                 conn.commit()
                 logger.info("Database tables created successfully")
         finally:
             release_db_connection(conn)
             
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {str(e)}")
         raise
 
 def clockout(update, context):
