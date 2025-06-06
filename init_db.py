@@ -1,7 +1,9 @@
 import os
 import psycopg2
+import psycopg2.extras
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 import logging
+import requests
 
 # 设置日志
 logging.basicConfig(
@@ -9,6 +11,30 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# === 添加地址解析功能 ===
+def get_address_from_location(latitude, longitude):
+    """根据经纬度获取地址"""
+    try:
+        # 从环境变量获取API密钥
+        GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+        if not GOOGLE_API_KEY:
+            logger.error("GOOGLE_API_KEY not set in environment variables")
+            return "API key not available"
+            
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={latitude},{longitude}&key={GOOGLE_API_KEY}"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        
+        if data['status'] == 'OK' and data['results']:
+            # 获取最精确的地址
+            return data['results'][0]['formatted_address']
+        else:
+            logger.error(f"Error getting address: {data}")
+            return "Address not available"
+    except Exception as e:
+        logger.error(f"Error in get_address_from_location: {e}")
+        return "Address lookup failed"
 
 def init_database():
     """初始化数据库和表结构"""
@@ -22,9 +48,15 @@ def init_database():
     
     try:
         # 连接数据库
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            cursor_factory=psycopg2.extras.DictCursor
+        )
         conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
         cur = conn.cursor()
+        
+        # 设置时区
+        cur.execute("SET timezone TO 'Asia/Kuala_Lumpur'")
         
         # 创建表
         # 1. 司机表
@@ -47,29 +79,33 @@ def init_database():
             id SERIAL PRIMARY KEY,
             user_id BIGINT REFERENCES drivers(user_id),
             date DATE NOT NULL,
-            clock_in TIMESTAMP WITH TIME ZONE,
-            clock_out TIMESTAMP WITH TIME ZONE,
+            clock_in VARCHAR(30),
+            clock_out VARCHAR(30),
             is_off BOOLEAN DEFAULT FALSE,
+            location_address TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, date)
         )
         """)
         logger.info("创建 clock_logs 表成功")
-        
-        # 3. 充值记录表
+
+        # 3. 月度报告表
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS topups (
+        CREATE TABLE IF NOT EXISTS monthly_reports (
             id SERIAL PRIMARY KEY,
             user_id BIGINT REFERENCES drivers(user_id),
-            amount FLOAT NOT NULL,
-            date DATE NOT NULL,
-            admin_id BIGINT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            report_date DATE NOT NULL,
+            total_claims FLOAT DEFAULT 0.0,
+            total_ot_hours FLOAT DEFAULT 0.0,
+            total_salary FLOAT DEFAULT 0.0,
+            work_days INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, report_date)
         )
         """)
-        logger.info("创建 topups 表成功")
-        
-        # 4. 报销记录表
+        logger.info("创建 monthly_reports 表成功")
+
+        # 4. Claims表（如果还没有的话）
         cur.execute("""
         CREATE TABLE IF NOT EXISTS claims (
             id SERIAL PRIMARY KEY,
@@ -78,18 +114,32 @@ def init_database():
             amount FLOAT NOT NULL,
             date DATE NOT NULL,
             photo_file_id TEXT,
-            status TEXT DEFAULT 'pending',
+            status TEXT DEFAULT 'PENDING',
+            paid_date TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         )
         """)
         logger.info("创建 claims 表成功")
         
-        # 5. 创建索引
-        # 为常用查询创建索引以提高性能
+        # 确保 location_address 列存在
+        cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM information_schema.columns 
+                WHERE table_name='clock_logs' AND column_name='location_address'
+            ) THEN
+                ALTER TABLE clock_logs ADD COLUMN location_address TEXT;
+            END IF;
+        END $$;
+        """)
+        
+        # 创建索引
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
+        CREATE INDEX IF NOT EXISTS idx_monthly_reports_user_date ON monthly_reports(user_id, report_date);
         CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
-        CREATE INDEX IF NOT EXISTS idx_topups_user_date ON topups(user_id, date);
         """)
         logger.info("创建索引成功")
         
@@ -102,13 +152,9 @@ def init_database():
         logger.error(f"数据库初始化失败: {str(e)}")
         raise
 
-def main():
-    """主函数"""
+if __name__ == "__main__":
     try:
         init_database()
     except Exception as e:
         logger.error(f"程序执行失败: {str(e)}")
-        exit(1)
-
-if __name__ == "__main__":
-    main() 
+        exit(1) 
