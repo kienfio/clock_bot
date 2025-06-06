@@ -26,7 +26,43 @@ from dotenv import load_dotenv
 from pathlib import Path
 import time
 import atexit
+import datetime
+import threading
+import telebot
 
+TOKEN = 'YOUR_TOKEN_HERE'
+bot = telebot.TeleBot(TOKEN)
+
+@bot.message_handler(commands=['start'])
+def start_message(message):
+    bot.send_message(message.chat.id, 'Hello!')
+
+@bot.message_handler(commands=['clockin'])
+def clockin_message(message):
+    # 这里是 clockin 命令的处理函数
+    bot.send_message(message.chat.id, 'Clock in successful!')
+    # 您可以添加其他逻辑来处理 clockin 命令
+
+def main():
+    bot.polling()
+
+if __name__ == "__main__":
+    main()import sqlite3
+    
+    def init_db():
+        conn = sqlite3.connect("clock_bot.db", check_same_thread=True)
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS clock (
+                    id INTEGER PRIMARY KEY,
+                    time TEXT
+                )""")
+        conn.commit()
+        conn.close()
+    
+    if __name__ == "__main__":
+        init_db()import os
+        
+        TOKEN = os.getenv('TOKEN')
 # === 初始化设置 ===
 app = Flask(__name__)
 
@@ -624,10 +660,6 @@ def init_bot():
     dispatcher.add_handler(CommandHandler("PDF", pdf_start))
     dispatcher.add_handler(CallbackQueryHandler(pdf_button_callback, pattern=r"^pdf_"))
     
-    # 历史报告命令和回调
-    dispatcher.add_handler(CommandHandler("previousreport", previousreport))
-    dispatcher.add_handler(CallbackQueryHandler(show_monthly_report, pattern=r"^report_"))
-    
     # 注册简单命令处理器
     dispatcher.add_handler(CommandHandler("clockout", clockout))
     dispatcher.add_handler(CommandHandler("offday", offday))
@@ -648,24 +680,6 @@ def start(update, context):
             cur.execute("SELECT * FROM drivers WHERE user_id = %s", (user.id,))
             driver = cur.fetchone()
             
-            welcome_msg = (
-                f"👋 Hello {user.first_name}!\n"
-                "Welcome to Worker ClockIn Bot.\n\n"
-                "Available Commands:\n"
-                "🕑 /clockin\n"
-                "🏁 /clockout\n"
-                "📅 /offday\n"
-                "💸 /claim\n"
-                "⏰ /OT\n\n"
-                "🔐 Admin Commands:\n"
-                "📊 /checkstate\n"
-                "🧾 /PDF\n"
-                "📷 /viewclaims\n"
-                "💰 /salary\n"
-                "🟢 /paid\n"
-                "📋 /previousreport"
-            )
-            
             if not driver:
                 # 创建新用户，确保工资为0
                 cur.execute(
@@ -674,7 +688,39 @@ def start(update, context):
                     (user.id, user.username, user.first_name)
                 )
                 conn.commit()
-                
+                welcome_msg = (
+                    f"👋 Hello {user.first_name}!\n"
+                    "Welcome to Worker ClockIn Bot.\n\n"
+                    "Available Commands:\n"
+                    "🕑 /clockin\n"
+                    "🏁 /clockout\n"
+                    "📅 /offday\n"
+                    "💸 /claim\n"
+                    "⏰ /OT\n\n"
+                    "🔐 Admin Commands:\n"
+                    "📊 /checkstate\n"
+                    "🧾 /PDF\n"
+                    "📷 /viewclaims\n"
+                    "💰 /salary\n"
+                    "🟢 /paid"
+                )
+            else:
+                welcome_msg = (
+                    f"👋 Hello {user.first_name}!\n"
+                    "Welcome to Worker ClockIn Bot.\n\n"
+                    "Available Commands:\n"
+                    "🕑 /clockin\n"
+                    "🏁 /clockout\n"
+                    "📅 /offday\n"
+                    "💸 /claim\n"
+                    "⏰ /OT\n\n"
+                    "🔐 Admin Commands:\n"
+                    "📊 /checkstate\n"
+                    "🧾 /PDF\n"
+                    "📷 /viewclaims\n"
+                    "💰 /salary\n"
+                    "🟢 /paid"
+                )
     except Exception as e:
         logger.error(f"Error in start command: {str(e)}")
         welcome_msg = "❌ An error occurred. Please try again or contact admin."
@@ -1257,21 +1303,6 @@ def paid_confirm(update, context):
                  context.user_data['work_days'], context.user_data['off_days'],
                  context.user_data['month_hours'], context.user_data['ot_hours'],
                  first_day, last_day)
-            )
-            
-            # 保存月度报告
-            cur.execute(
-                """INSERT INTO monthly_reports 
-                   (user_id, report_date, total_claims, total_ot_hours, total_salary, work_days)
-                   VALUES (%s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (user_id, report_date) 
-                   DO UPDATE SET
-                       total_claims = EXCLUDED.total_claims,
-                       total_ot_hours = EXCLUDED.total_ot_hours,
-                       total_salary = EXCLUDED.total_salary,
-                       work_days = EXCLUDED.work_days""",
-                (user_id, first_day, claims_amount, context.user_data['ot_hours'],
-                 monthly_salary, context.user_data['work_days'])
             )
             
             # 清除已支付的报销记录
