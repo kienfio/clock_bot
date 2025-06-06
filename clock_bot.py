@@ -1221,6 +1221,9 @@ def paid_select_driver(update, context):
                 )
                 claims_amount = cur.fetchone()[0] or 0
                 
+                # 计算总金额
+                total_amount = monthly_salary + claims_amount
+                
                 # 保存数据到上下文
                 context.user_data.update({
                     'monthly_salary': monthly_salary,
@@ -1230,7 +1233,8 @@ def paid_select_driver(update, context):
                     'ot_hours': ot_hours,
                     'claims_amount': claims_amount,
                     'first_day': first_day,
-                    'last_day': last_day
+                    'last_day': last_day,
+                    'total_amount': total_amount
                 })
                 
                 # 创建工资总结消息
@@ -1243,6 +1247,7 @@ def paid_select_driver(update, context):
                     f"📊 Work Days: {work_days} days",
                     f"🏖 Off Days: {off_days} days",
                     f"🧾 Claims: RM {claims_amount:.2f}\n",
+                    f"💰 Total Amount: RM {total_amount:.2f}\n",
                     "Do you want to mark this month's salary as paid?"
                 ]
                 
@@ -1299,9 +1304,8 @@ def paid_confirm(update, context):
     work_days = context.user_data['work_days']
     month_hours = context.user_data['month_hours']
     ot_hours = context.user_data['ot_hours']
-    
-    # 计算总金额
-    total_amount = monthly_salary + claims_amount
+    off_days = context.user_data['off_days']
+    total_amount = context.user_data['total_amount']
     
     conn = get_db_connection()
     try:
@@ -1313,8 +1317,7 @@ def paid_confirm(update, context):
                     work_days, off_days, work_hours, ot_hours, period_start, period_end)
                    VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (user_id, monthly_salary, claims_amount, total_amount,
-                 work_days, context.user_data['off_days'],
-                 month_hours, ot_hours,
+                 work_days, off_days, month_hours, ot_hours,
                  first_day, last_day)
             )
             
@@ -1323,7 +1326,13 @@ def paid_confirm(update, context):
                 """INSERT INTO monthly_reports 
                    (user_id, report_date, total_claims, total_ot_hours, 
                     total_salary, work_days)
-                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (user_id, report_date) 
+                   DO UPDATE SET 
+                     total_claims = EXCLUDED.total_claims,
+                     total_ot_hours = EXCLUDED.total_ot_hours,
+                     total_salary = EXCLUDED.total_salary,
+                     work_days = EXCLUDED.work_days""",
                 (user_id, first_day, claims_amount, ot_hours, 
                  total_amount, work_days)
             )
