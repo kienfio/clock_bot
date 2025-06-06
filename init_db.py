@@ -138,7 +138,7 @@ def init_database():
         # 创建索引
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
-        CREATE INDEX IF NOT EXISTS idx_monthly_reports_user_year_month ON monthly_reports(user_id, year, month);
+        CREATE INDEX IF NOT EXISTS idx_monthly_reports_user_date ON monthly_reports(user_id, report_date);
         CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
         """)
         logger.info("创建索引成功")
