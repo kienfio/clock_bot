@@ -831,7 +831,7 @@ def offday(update, context):
             )
             log = cur.fetchone()
             
-            if log and (log[0] not in [None, "OFF"] or log[1]):
+            if log and (log[0] is not None or log[1] is not None):
                 update.message.reply_text("❌ Cannot mark as off day - already have clock records for today.")
                 return
             
@@ -839,14 +839,14 @@ def offday(update, context):
             if log:
                 cur.execute(
                     """UPDATE clock_logs 
-                       SET clock_in = 'OFF', clock_out = NULL, is_off = TRUE 
+                       SET clock_in = NULL, clock_out = NULL, is_off = TRUE 
                        WHERE user_id = %s AND date = %s""",
                     (user.id, today)
                 )
             else:
                 cur.execute(
-                    """INSERT INTO clock_logs (user_id, date, clock_in, is_off) 
-                       VALUES (%s, %s, 'OFF', TRUE)""",
+                    """INSERT INTO clock_logs (user_id, date, clock_in, clock_out, is_off) 
+                       VALUES (%s, %s, NULL, NULL, TRUE)""",
                     (user.id, today)
                 )
             conn.commit()
