@@ -67,7 +67,9 @@ CLAIM_PROOF = 3
 PAID_SELECT_DRIVER = 0
 PAID_CONFIRM = 1
 VIEWCLAIMS_SELECT_USER = 10
-CHECKSTATE_SELECT_USER = 11
+VIEWCLAIMS_SELECT_YEAR = 11
+VIEWCLAIMS_SELECT_MONTH = 12
+CHECKSTATE_SELECT_USER = 13
 # 添加新的状态常量
 PREVIOUSREPORT_SELECT_WORKER = 20
 PREVIOUSREPORT_SELECT_YEAR = 21
@@ -586,6 +588,8 @@ def init_bot():
         entry_points=[CommandHandler("viewclaims", viewclaims_start)],
         states={
             VIEWCLAIMS_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_user)],
+            VIEWCLAIMS_SELECT_YEAR: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_year)],
+            VIEWCLAIMS_SELECT_MONTH: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_month)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True
@@ -700,7 +704,8 @@ def start(update, context):
                     "🧾 /PDF\n"
                     "📷 /viewclaims\n"
                     "💰 /salary\n"
-                    "🟢 /paid"
+                    "🟢 /paid\n"
+                    "📈 /previousreport"
                 )
     except Exception as e:
         logger.error(f"Error in start command: {str(e)}")
@@ -1720,59 +1725,198 @@ def handle_page_navigation(update, context):
     return None
 
 def viewclaims_select_user(update, context):
-    """选择要查看报销记录的用户"""
-    # 检查是否是导航命令
-    nav_result = handle_page_navigation(update, context)
-    if nav_result is not None:
-        return nav_result
-        
+    """处理选择工人的回调"""
+    text = update.message.text
+    
+    if text == "⬅️ Previous" or text == "Next ➡️" or text == "🔄 Refresh":
+        return handle_page_navigation(update, context)
+    
+    conn = get_db_connection()
     try:
-        user_id = int(update.message.text.split()[0])
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """SELECT type, amount, date, status 
-                       FROM claims 
-                       WHERE user_id = %s 
-                       ORDER BY date DESC 
-                       LIMIT 5""",
-                    (user_id,)
-                )
-                claims = cur.fetchall()
-                
-                if not claims:
-                    update.message.reply_text(
-                        "📝 No claims found.",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
-                    return ConversationHandler.END
-                
-                message = ["📋 Recent Claims:"]
-                for claim in claims:
-                    claim_type, amount, date, status = claim
-                    message.append(
-                        f"\n{date.strftime('%Y-%m-%d')}"
-                        f"\nType: {claim_type}"
-                        f"\nAmount: RM {amount:.2f}"
-                        f"\nStatus: {status}"
-                        f"\n{'-'*20}"
-                    )
-                
+        with conn.cursor() as cur:
+            # 获取工人信息
+            cur.execute(
+                """SELECT user_id, first_name, username 
+                   FROM drivers 
+                   WHERE first_name = %s OR username = %s""",
+                (text, text)
+            )
+            worker = cur.fetchone()
+            
+            if not worker:
+                update.message.reply_text("❌ Worker not found. Please try again.")
+                return VIEWCLAIMS_SELECT_USER
+            
+            # 保存选中的工人信息到上下文
+            context.user_data['selected_worker'] = {
+                'user_id': worker[0],
+                'first_name': worker[1],
+                'username': worker[2]
+            }
+            
+            # 创建年份选择键盘
+            current_year = datetime.datetime.now().year
+            years = [str(year) for year in range(current_year - 2, current_year + 1)]
+            keyboard = [[year] for year in years]
+            keyboard.append(["👁 View All Claims"])  # 添加查看所有记录的选项
+            keyboard.append(["❌ Cancel"])
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
+            update.message.reply_text(
+                f"Please select the year for {worker[1]}'s claims, or choose 'View All Claims' to see all records:",
+                reply_markup=reply_markup
+            )
+            return VIEWCLAIMS_SELECT_YEAR
+            
+    except Exception as e:
+        logger.error(f"Error in viewclaims_select_user: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact support.")
+        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
+
+def viewclaims_select_year(update, context):
+    """处理选择年份的回调"""
+    text = update.message.text
+    
+    if text == "❌ Cancel":
+        return cancel(update, context)
+    
+    if text == "👁 View All Claims":
+        # 如果选择查看所有记录，直接调用原来的 viewclaims 函数
+        return viewclaims(update, context)
+    
+    try:
+        year = int(text)
+        context.user_data['selected_year'] = year
+        
+        # 创建月份选择键盘
+        months = [
+            ["January", "February", "March"],
+            ["April", "May", "June"],
+            ["July", "August", "September"],
+            ["October", "November", "December"],
+            ["👁 View Whole Year"],  # 添加查看整年的选项
+            ["❌ Cancel"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(months, resize_keyboard=True)
+        
+        worker = context.user_data['selected_worker']
+        update.message.reply_text(
+            f"Please select the month for {worker['first_name']}'s {year} claims, or choose 'View Whole Year' to see all claims in {year}:",
+            reply_markup=reply_markup
+        )
+        return VIEWCLAIMS_SELECT_MONTH
+        
+    except ValueError:
+        update.message.reply_text("❌ Invalid year. Please select a year from the keyboard.")
+        return VIEWCLAIMS_SELECT_YEAR
+
+def viewclaims_select_month(update, context):
+    """处理选择月份的回调"""
+    text = update.message.text
+    worker = context.user_data['selected_worker']
+    year = context.user_data['selected_year']
+    
+    if text == "❌ Cancel":
+        return cancel(update, context)
+    
+    if text == "👁 View Whole Year":
+        # 如果选择查看整年，不需要指定月份
+        month = None
+    else:
+        # 月份名称到数字的映射
+        month_mapping = {
+            "January": 1, "February": 2, "March": 3,
+            "April": 4, "May": 5, "June": 6,
+            "July": 7, "August": 8, "September": 9,
+            "October": 10, "November": 11, "December": 12
+        }
+        
+        if text not in month_mapping:
+            update.message.reply_text("❌ Invalid month. Please select a month from the keyboard.")
+            return VIEWCLAIMS_SELECT_MONTH
+        
+        month = month_mapping[text]
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 构建查询
+            query = """
+                SELECT c.claim_type, c.amount, c.status, c.created_at, c.proof_file_id
+                FROM claims c
+                WHERE c.user_id = %s AND EXTRACT(YEAR FROM c.created_at) = %s
+            """
+            params = [worker['user_id'], year]
+            
+            if month is not None:
+                query += " AND EXTRACT(MONTH FROM c.created_at) = %s"
+                params.append(month)
+            
+            query += " ORDER BY c.created_at DESC"
+            
+            cur.execute(query, params)
+            claims = cur.fetchall()
+            
+            if not claims:
+                period = f"{text} {year}" if month else f"year {year}"
                 update.message.reply_text(
-                    "".join(message),
+                    f"No claims found for {worker['first_name']} in {period}.",
                     reply_markup=ReplyKeyboardRemove()
                 )
-        finally:
-            release_db_connection(conn)
-        
+                return ConversationHandler.END
+            
+            # 生成报告消息
+            period = f"{text} {year}" if month else f"Year {year}"
+            report = f"📋 Claims Report for {worker['first_name']} - {period}\n\n"
+            
+            total_amount = 0
+            total_approved = 0
+            total_pending = 0
+            total_rejected = 0
+            
+            for claim in claims:
+                claim_type, amount, status, created_at, proof_file_id = claim
+                report += f"📅 {created_at.strftime('%d/%m/%Y')}\n"
+                report += f"📝 Type: {claim_type}\n"
+                report += f"💰 Amount: RM {amount:.2f}\n"
+                report += f"📊 Status: {status}\n"
+                if proof_file_id:
+                    report += f"📎 Has Proof: Yes\n"
+                report += "\n"
+                
+                total_amount += amount
+                if status == 'APPROVED':
+                    total_approved += amount
+                elif status == 'PENDING':
+                    total_pending += amount
+                elif status == 'REJECTED':
+                    total_rejected += amount
+            
+            # 添加统计信息
+            report += "📊 Summary:\n"
+            report += f"💰 Total Claims: RM {total_amount:.2f}\n"
+            report += f"✅ Total Approved: RM {total_approved:.2f}\n"
+            report += f"⏳ Total Pending: RM {total_pending:.2f}\n"
+            report += f"❌ Total Rejected: RM {total_rejected:.2f}\n"
+            
+            # 分段发送报告（如果太长）
+            if len(report) > 4000:
+                chunks = [report[i:i+4000] for i in range(0, len(report), 4000)]
+                for chunk in chunks:
+                    update.message.reply_text(chunk)
+            else:
+                update.message.reply_text(report)
+            
+            return ConversationHandler.END
+            
+    except Exception as e:
+        logger.error(f"Error in viewclaims_select_month: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact support.")
         return ConversationHandler.END
-    except (ValueError, IndexError):
-        update.message.reply_text(
-            "❌ Please select a valid worker.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
 
 def viewclaims(update, context):
     """查看报销记录"""
