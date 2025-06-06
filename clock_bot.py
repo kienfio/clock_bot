@@ -1957,35 +1957,12 @@ def viewclaims_select_month(update, context):
                 # 生成报告消息
                 report = f"📋 Claims Report for {worker['first_name']} - {month_name} {year}\n\n"
                 
-                total_amount = 0
-                total_approved = 0
-                total_pending = 0
-                total_rejected = 0
-                
                 for claim in claims:
                     claim_type, amount, status, created_at, photo_file_id = claim
                     report += f"📅 {created_at.strftime('%d/%m/%Y')}\n"
                     report += f"📝 Type: {claim_type}\n"
                     report += f"💰 Amount: RM {amount:.2f}\n"
-                    report += f"📊 Status: {status}\n"
-                    if photo_file_id:
-                        report += f"📎 Has Photo: Yes\n"
                     report += "\n"
-                    
-                    total_amount += amount
-                    if status == 'APPROVED':
-                        total_approved += amount
-                    elif status == 'PENDING':
-                        total_pending += amount
-                    elif status == 'REJECTED':
-                        total_rejected += amount
-                
-                # 添加统计信息
-                report += "📊 Summary:\n"
-                report += f"💰 Total Claims: RM {total_amount:.2f}\n"
-                report += f"✅ Total Approved: RM {total_approved:.2f}\n"
-                report += f"⏳ Total Pending: RM {total_pending:.2f}\n"
-                report += f"❌ Total Rejected: RM {total_rejected:.2f}\n"
                 
                 # 分段发送报告（如果太长）
                 if len(report) > 4000:
@@ -2015,7 +1992,7 @@ def viewclaims(update, context):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT type, amount, date, status 
+                """SELECT type, amount, date 
                    FROM claims 
                    WHERE user_id = %s 
                    AND (status IS NULL OR status = 'PENDING')
@@ -2031,13 +2008,12 @@ def viewclaims(update, context):
             
             message = ["📋 Pending Claims:"]
             for claim in claims:
-                claim_type, amount, date, status = claim
+                claim_type, amount, date = claim
                 message.append(
-                    f"\n{date.strftime('%Y-%m-%d')}"
-                    f"\nType: {claim_type}"
-                    f"\nAmount: RM {amount:.2f}"
-                    f"\nStatus: {status or 'PENDING'}"
-                    f"\n{'-'*20}"
+                    f"\n📅 {date.strftime('%Y-%m-%d')}"
+                    f"\n📝 Type: {claim_type}"
+                    f"\n💰 Amount: RM {amount:.2f}"
+                    f"\n"
                 )
             
             update.message.reply_text("".join(message))
