@@ -1296,6 +1296,9 @@ def paid_confirm(update, context):
     claims_amount = context.user_data['claims_amount']
     first_day = context.user_data['first_day']
     last_day = context.user_data['last_day']
+    work_days = context.user_data['work_days']
+    month_hours = context.user_data['month_hours']
+    ot_hours = context.user_data['ot_hours']
     
     # 计算总金额
     total_amount = monthly_salary + claims_amount
@@ -1303,25 +1306,54 @@ def paid_confirm(update, context):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # 记录工资发放
+            # 1. 记录工资发放
             cur.execute(
                 """INSERT INTO salary_payments 
                    (user_id, payment_date, salary_amount, claims_amount, total_amount, 
                     work_days, off_days, work_hours, ot_hours, period_start, period_end)
                    VALUES (%s, CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (user_id, monthly_salary, claims_amount, total_amount,
-                 context.user_data['work_days'], context.user_data['off_days'],
-                 context.user_data['month_hours'], context.user_data['ot_hours'],
+                 work_days, context.user_data['off_days'],
+                 month_hours, ot_hours,
                  first_day, last_day)
             )
             
-            # 清除已支付的报销记录
+            # 2. 保存月度报告
+            cur.execute(
+                """INSERT INTO monthly_reports 
+                   (user_id, report_date, total_claims, total_ot_hours, 
+                    total_salary, work_days)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (user_id, first_day, claims_amount, ot_hours, 
+                 total_amount, work_days)
+            )
+            
+            # 3. 更新报销记录状态
             cur.execute(
                 """UPDATE claims 
                    SET status = 'PAID', paid_date = CURRENT_TIMESTAMP
                    WHERE user_id = %s 
                    AND date BETWEEN %s AND %s 
                    AND (status IS NULL OR status = 'PENDING')""",
+                (user_id, first_day, last_day)
+            )
+            
+            # 4. 重置工作记录
+            # 4.1 重置打卡记录
+            cur.execute(
+                """UPDATE clock_logs 
+                   SET clock_in = NULL, clock_out = NULL
+                   WHERE user_id = %s 
+                   AND date BETWEEN %s AND %s""",
+                (user_id, first_day, last_day)
+            )
+            
+            # 4.2 重置加班记录
+            cur.execute(
+                """UPDATE ot_logs 
+                   SET duration = 0
+                   WHERE user_id = %s 
+                   AND date BETWEEN %s AND %s""",
                 (user_id, first_day, last_day)
             )
             
@@ -1333,7 +1365,8 @@ def paid_confirm(update, context):
                 f"💵 Base Salary: RM {monthly_salary:.2f}",
                 f"🧾 Claims: RM {claims_amount:.2f}",
                 f"💰 Total Paid: RM {total_amount:.2f}\n",
-                f"Payment recorded successfully!"
+                f"Payment recorded successfully!\n",
+                "All data has been reset for the next month."
             ]
             
             update.message.reply_text(
@@ -1928,24 +1961,25 @@ def viewclaims(update, context):
                 """SELECT type, amount, date, status 
                    FROM claims 
                    WHERE user_id = %s 
+                   AND (status IS NULL OR status = 'PENDING')
                    ORDER BY date DESC 
-                   LIMIT 5""",
+                   LIMIT 10""",
                 (user.id,)
             )
             claims = cur.fetchall()
             
             if not claims:
-                update.message.reply_text("📝 No claims found.")
+                update.message.reply_text("📝 No pending claims found.")
                 return
             
-            message = ["📋 Recent Claims:"]
+            message = ["📋 Pending Claims:"]
             for claim in claims:
                 claim_type, amount, date, status = claim
                 message.append(
                     f"\n{date.strftime('%Y-%m-%d')}"
                     f"\nType: {claim_type}"
                     f"\nAmount: RM {amount:.2f}"
-                    f"\nStatus: {status}"
+                    f"\nStatus: {status or 'PENDING'}"
                     f"\n{'-'*20}"
                 )
             
@@ -2050,146 +2084,150 @@ def checkstate_start(update, context):
     return show_workers_page(update, context, page=1, command="checkstate")
 
 def checkstate_select_user(update, context):
-    """选择要查看状态的用户"""
-    # 检查是否是导航命令
-    nav_result = handle_page_navigation(update, context)
-    if nav_result is not None:
-        return nav_result
-        
+    """处理选择工人的回调"""
+    text = update.message.text
+    
+    if text == "⬅️ Previous" or text == "Next ➡️" or text == "🔄 Refresh":
+        return handle_page_navigation(update, context)
+    
+    conn = get_db_connection()
+    
     try:
-        # 记录日志，帮助调试
-        logger.info(f"checkstate_select_user received text: '{update.message.text}'")
+        # 从输入文本中提取用户ID
+        user_id = int(text.split(' - ')[0])
         
-        user_id = int(update.message.text.split()[0])
-        logger.info(f"Attempting to get status for user_id: {user_id}")
-        
-        conn = get_db_connection()
-        try:
-            with conn.cursor() as cur:
-                # 获取基本信息
-                cur.execute(
-                    """SELECT first_name, monthly_salary, total_hours 
-                       FROM drivers 
-                       WHERE user_id = %s""",
-                    (user_id,)
-                )
-                basic_info = cur.fetchone()
-                
-                if not basic_info:
-                    update.message.reply_text(
-                        "❌ Worker not found.",
-                        reply_markup=ReplyKeyboardRemove()
-                    )
-                    return ConversationHandler.END
-                
-                name, monthly_salary, total_hours = basic_info
-                
-                # 获取本月工作天数和休息日
-                cur.execute(
-                    """SELECT 
-                        COUNT(DISTINCT date) as work_days,
-                        COUNT(DISTINCT CASE WHEN is_off THEN date END) as off_days
-                    FROM clock_logs 
-                    WHERE user_id = %s 
-                    AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
-                    (user_id,)
-                )
-                work_stats = cur.fetchone() or (0, 0)
-                work_days, off_days = work_stats
-                
-                # 获取本月工作时长 - 使用更安全的方法计算时间差
-                cur.execute(
-                    """SELECT 
-                        date, 
-                        clock_in, 
-                        clock_out, 
-                        is_off
-                    FROM clock_logs 
-                    WHERE user_id = %s 
-                    AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)""",
-                    (user_id,)
-                )
-                logs = cur.fetchall()
-                
-                # 手动计算工作时长，避免SQL中的时间戳转换问题
-                month_hours = 0
-                for log in logs:
-                    date, clock_in, clock_out, is_off = log
-                    if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
-                        try:
-                            # 尝试解析时间戳
-                            if isinstance(clock_in, str) and isinstance(clock_out, str):
-                                in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
-                                out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
-                                hours = (out_time - in_time).total_seconds() / 3600
-                                if hours > 0:
-                                    month_hours += hours
-                        except (ValueError, TypeError) as e:
-                            logger.warning(f"Error parsing timestamps for date {date}: {e}")
-                
-                # 获取本月 OT 时长
-                cur.execute(
-                    """SELECT COALESCE(SUM(duration), 0) as total_ot_hours
-                       FROM ot_logs 
-                       WHERE user_id = %s 
-                       AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
-                       AND end_time IS NOT NULL""",
-                    (user_id,)
-                )
-                ot_hours = cur.fetchone()[0] or 0
-                ot_hours_int = int(ot_hours)
-                ot_minutes = int((ot_hours - ot_hours_int) * 60)
-                
-                # 获取报销总额
-                cur.execute(
-                    """SELECT COALESCE(SUM(amount), 0) as total_claims
-                       FROM claims 
-                       WHERE user_id = %s""",
-                    (user_id,)
-                )
-                total_claims = cur.fetchone()[0] or 0
-                
-                message = [
-                    f"📊 Worker Status: {name}\n",
-                    f"💰 Monthly Salary: RM {monthly_salary:.2f}",
-                    f"⏰ Total Work Hours (All time): {format_duration(total_hours)}",
-                    f"⏰ This Month Hours: {format_duration(month_hours)}",
-                    f"🕒 This Month OT: {ot_hours_int}h {ot_minutes}m",
-                    f"📅 This Month Work Days: {work_days} days",
-                    f"🏖 This Month Off Days: {off_days} days",
-                    f"💵 Total Claims: RM {total_claims:.2f}"
-                ]
-                
-                update.message.reply_text(
-                    "\n".join(message),
-                    reply_markup=ReplyKeyboardRemove()
-                )
-                logger.info(f"Successfully sent status for user {user_id}")
-                
-        except Exception as e:
-            logger.error(f"Database error in checkstate_select_user: {str(e)}")
+        with conn.cursor() as cur:
+            # 获取工人基本信息
+            cur.execute(
+                """SELECT user_id, first_name, username, monthly_salary, total_hours 
+                   FROM drivers 
+                   WHERE user_id = %s""",
+                (user_id,)
+            )
+            worker = cur.fetchone()
+            
+            if not worker:
+                update.message.reply_text("❌ Worker not found. Please try again.")
+                return CHECKSTATE_SELECT_USER
+            
+            user_id, name, username, monthly_salary, total_hours = worker
+            
+            # 获取本月工作天数
+            cur.execute(
+                """SELECT 
+                    COUNT(*) as work_days,
+                    COUNT(*) FILTER (WHERE is_off = true) as off_days
+                   FROM clock_logs 
+                   WHERE user_id = %s 
+                   AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                   AND date <= CURRENT_DATE""",
+                (user_id,)
+            )
+            days_result = cur.fetchone()
+            work_days = days_result[0] or 0
+            off_days = days_result[1] or 0
+            
+            # 获取本月工作时长 - 只统计未支付的记录
+            cur.execute(
+                """SELECT 
+                    date, 
+                    clock_in, 
+                    clock_out, 
+                    is_off
+                FROM clock_logs 
+                WHERE user_id = %s 
+                AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                AND date NOT IN (
+                    SELECT period_start::date
+                    FROM salary_payments
+                    WHERE user_id = %s
+                    AND date_trunc('month', period_start) = date_trunc('month', CURRENT_DATE)
+                )""",
+                (user_id, user_id)
+            )
+            logs = cur.fetchall()
+            
+            # 手动计算工作时长
+            month_hours = 0
+            for log in logs:
+                date, clock_in, clock_out, is_off = log
+                if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
+                    try:
+                        if isinstance(clock_in, str) and isinstance(clock_out, str):
+                            in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
+                            out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
+                            hours = (out_time - in_time).total_seconds() / 3600
+                            if hours > 0:
+                                month_hours += hours
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Error parsing timestamps for date {date}: {e}")
+            
+            # 获取本月未支付的 OT 时长
+            cur.execute(
+                """SELECT COALESCE(SUM(duration), 0) as total_ot_hours
+                   FROM ot_logs 
+                   WHERE user_id = %s 
+                   AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
+                   AND end_time IS NOT NULL
+                   AND date NOT IN (
+                       SELECT period_start::date
+                       FROM salary_payments
+                       WHERE user_id = %s
+                       AND date_trunc('month', period_start) = date_trunc('month', CURRENT_DATE)
+                   )""",
+                (user_id, user_id)
+            )
+            ot_hours = cur.fetchone()[0] or 0
+            ot_hours_int = int(ot_hours)
+            ot_minutes = int((ot_hours - ot_hours_int) * 60)
+            
+            # 获取未支付的报销总额
+            cur.execute(
+                """SELECT COALESCE(SUM(amount), 0) as total_claims
+                   FROM claims 
+                   WHERE user_id = %s
+                   AND (status IS NULL OR status = 'PENDING')""",
+                (user_id,)
+            )
+            total_claims = cur.fetchone()[0] or 0
+            
+            message = [
+                f"📊 Worker Status: {name}\n",
+                f"💰 Monthly Salary: RM {monthly_salary:.2f}",
+                f"⏰ Total Work Hours (All time): {format_duration(total_hours)}",
+                f"⏰ This Month Unpaid Hours: {format_duration(month_hours)}",
+                f"🕒 This Month Unpaid OT: {ot_hours_int}h {ot_minutes}m",
+                f"📅 This Month Work Days: {work_days} days",
+                f"🏖 This Month Off Days: {off_days} days",
+                f"💵 Pending Claims: RM {total_claims:.2f}"
+            ]
+            
             update.message.reply_text(
-                "❌ Database error occurred. Please try again or contact admin.",
+                "\n".join(message),
                 reply_markup=ReplyKeyboardRemove()
             )
-        finally:
-            release_db_connection(conn)
-        
-        return ConversationHandler.END
+            logger.info(f"Successfully sent status for user {user_id}")
+    
     except (ValueError, IndexError) as e:
         logger.error(f"Error parsing user input in checkstate_select_user: {str(e)}")
         update.message.reply_text(
             "❌ Please select a valid worker.",
             reply_markup=ReplyKeyboardRemove()
         )
-        return ConversationHandler.END
+        return CHECKSTATE_SELECT_USER
+    
     except Exception as e:
-        logger.error(f"Unexpected error in checkstate_select_user: {str(e)}")
+        logger.error(f"Error in checkstate_select_user: {str(e)}")
         update.message.reply_text(
-            "❌ An error occurred. Please try again or contact admin.",
+            "❌ An error occurred. Please try again.",
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
+        
+    finally:
+        release_db_connection(conn)
+    
+    return ConversationHandler.END
 
 def ot(update, context):
     """处理 OT 命令"""
@@ -2380,51 +2418,97 @@ def previousreport_select_month(update, context):
         
         month = month_mapping[month_name]
         worker = context.user_data['selected_worker']
+        user_id = worker['user_id']
         
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
-                # 获取该月的工资信息
+                # 获取该月的工资支付记录
                 cur.execute(
-                    """SELECT monthly_salary 
-                       FROM drivers 
-                       WHERE user_id = %s""",
-                    (worker['user_id'],)
+                    """SELECT 
+                        payment_date, 
+                        salary_amount, 
+                        claims_amount, 
+                        total_amount, 
+                        work_days, 
+                        off_days, 
+                        work_hours, 
+                        ot_hours
+                       FROM salary_payments 
+                       WHERE user_id = %s 
+                       AND EXTRACT(YEAR FROM period_start) = %s 
+                       AND EXTRACT(MONTH FROM period_start) = %s
+                       ORDER BY payment_date DESC
+                       LIMIT 1""",
+                    (user_id, year, month)
                 )
-                salary_result = cur.fetchone()
-                monthly_salary = salary_result[0] if salary_result else 0
+                payment = cur.fetchone()
                 
-                # 获取该月的报销信息
+                if not payment:
+                    update.message.reply_text(
+                        f"❌ No payment records found for {worker['first_name']} in {month_name} {year}.",
+                        reply_markup=ReplyKeyboardRemove()
+                    )
+                    return ConversationHandler.END
+                
+                payment_date, salary_amount, claims_amount, total_amount, work_days, off_days, work_hours, ot_hours = payment
+                
+                # 获取该月的已支付报销记录
                 cur.execute(
-                    """SELECT type, amount, status, created_at 
+                    """SELECT type, amount, status, created_at, photo_file_id
                        FROM claims 
                        WHERE user_id = %s 
-                       AND EXTRACT(YEAR FROM created_at) = %s 
-                       AND EXTRACT(MONTH FROM created_at) = %s
+                       AND EXTRACT(YEAR FROM date) = %s 
+                       AND EXTRACT(MONTH FROM date) = %s
+                       AND status = 'PAID'
                        ORDER BY created_at""",
-                    (worker['user_id'], year, month)
+                    (user_id, year, month)
                 )
                 claims = cur.fetchall()
                 
                 # 生成报告消息
-                report = f"📊 Report for {worker['first_name']} - {month_name} {year}\n\n"
-                report += f"💰 Monthly Salary: RM {monthly_salary:.2f}\n\n"
+                report = [
+                    f"📊 Payment Report for {worker['first_name']} - {month_name} {year}\n",
+                    f"💰 Payment Date: {payment_date.strftime('%Y-%m-%d')}\n",
+                    f"💵 Base Salary: RM {salary_amount:.2f}",
+                    f"🧾 Claims Amount: RM {claims_amount:.2f}",
+                    f"💰 Total Paid: RM {total_amount:.2f}\n",
+                    f"⏰ Work Hours: {format_duration(work_hours)}",
+                    f"🕒 OT Hours: {format_duration(ot_hours)}",
+                    f"📅 Work Days: {work_days} days",
+                    f"🏖 Off Days: {off_days} days"
+                ]
                 
+                # 添加报销详情
                 if claims:
-                    report += "📝 Claims:\n"
-                    total_claims = 0
+                    report.append("\n📝 Claims Details:")
                     for claim in claims:
-                        claim_type, amount, status, created_at = claim
-                        report += f"- {claim_type}: RM {amount:.2f} ({status}) - {created_at.strftime('%d/%m/%Y')}\n"
-                        if status == 'APPROVED':
-                            total_claims += amount
-                    report += f"\n💵 Total Approved Claims: RM {total_claims:.2f}"
-                else:
-                    report += "📝 No claims found for this month."
+                        claim_type, amount, status, created_at, photo_file_id = claim
+                        report.append(
+                            f"\n- {created_at.strftime('%d/%m/%Y')}"
+                            f"\n  Type: {claim_type}"
+                            f"\n  Amount: RM {amount:.2f}"
+                            f"\n  Status: {status}"
+                        )
                 
                 # 发送报告
                 reply_markup = ReplyKeyboardRemove()
-                update.message.reply_text(report, reply_markup=reply_markup)
+                update.message.reply_text(
+                    "\n".join(report), 
+                    reply_markup=reply_markup
+                )
+                
+                # 如果有照片，发送照片
+                for claim in claims:
+                    if claim[4]:  # photo_file_id
+                        try:
+                            update.message.reply_photo(
+                                photo=claim[4],
+                                caption=f"Receipt for {claim[0]} - RM {claim[1]:.2f}"
+                            )
+                        except Exception as e:
+                            logger.error(f"Error sending photo: {str(e)}")
+                
                 return ConversationHandler.END
                 
         except Exception as e:
