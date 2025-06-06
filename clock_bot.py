@@ -254,9 +254,24 @@ def init_db():
                     clock_out VARCHAR(30),
                     is_off BOOLEAN DEFAULT FALSE,
                     location_address TEXT,
+                    paid BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(user_id, date)
                 )
+                """)
+                
+                # 确保 clock_logs 表中的 paid 列存在
+                cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='clock_logs' AND column_name='paid'
+                    ) THEN
+                        ALTER TABLE clock_logs ADD COLUMN paid BOOLEAN DEFAULT FALSE;
+                    END IF;
+                END $$;
                 """)
                 
                 # 添加 OT 记录表
@@ -268,8 +283,23 @@ def init_db():
                     start_time TIMESTAMP WITH TIME ZONE,
                     end_time TIMESTAMP WITH TIME ZONE,
                     duration FLOAT DEFAULT 0.0,
+                    paid BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
+                """)
+                
+                # 确保 ot_logs 表中的 paid 列存在
+                cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 
+                        FROM information_schema.columns 
+                        WHERE table_name='ot_logs' AND column_name='paid'
+                    ) THEN
+                        ALTER TABLE ot_logs ADD COLUMN paid BOOLEAN DEFAULT FALSE;
+                    END IF;
+                END $$;
                 """)
                 
                 # 添加工资发放记录表
@@ -1347,20 +1377,20 @@ def paid_confirm(update, context):
                 (user_id, first_day, last_day)
             )
             
-            # 4. 重置工作记录
-            # 4.1 重置打卡记录
+            # 4. 标记工作记录为已支付
+            # 4.1 标记打卡记录为已支付
             cur.execute(
                 """UPDATE clock_logs 
-                   SET clock_in = NULL, clock_out = NULL
+                   SET paid = TRUE
                    WHERE user_id = %s 
                    AND date BETWEEN %s AND %s""",
                 (user_id, first_day, last_day)
             )
             
-            # 4.2 重置加班记录
+            # 4.2 标记加班记录为已支付
             cur.execute(
                 """UPDATE ot_logs 
-                   SET duration = 0
+                   SET paid = TRUE
                    WHERE user_id = %s 
                    AND date BETWEEN %s AND %s""",
                 (user_id, first_day, last_day)
@@ -2129,7 +2159,8 @@ def checkstate_select_user(update, context):
                    FROM clock_logs 
                    WHERE user_id = %s 
                    AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
-                   AND date <= CURRENT_DATE""",
+                   AND date <= CURRENT_DATE
+                   AND (paid = FALSE OR paid IS NULL)""",
                 (user_id,)
             )
             days_result = cur.fetchone()
@@ -2146,13 +2177,8 @@ def checkstate_select_user(update, context):
                 FROM clock_logs 
                 WHERE user_id = %s 
                 AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
-                AND date NOT IN (
-                    SELECT period_start::date
-                    FROM salary_payments
-                    WHERE user_id = %s
-                    AND date_trunc('month', period_start) = date_trunc('month', CURRENT_DATE)
-                )""",
-                (user_id, user_id)
+                AND (paid = FALSE OR paid IS NULL)""",
+                (user_id,)
             )
             logs = cur.fetchall()
             
@@ -2178,13 +2204,8 @@ def checkstate_select_user(update, context):
                    WHERE user_id = %s 
                    AND date_trunc('month', date) = date_trunc('month', CURRENT_DATE)
                    AND end_time IS NOT NULL
-                   AND date NOT IN (
-                       SELECT period_start::date
-                       FROM salary_payments
-                       WHERE user_id = %s
-                       AND date_trunc('month', period_start) = date_trunc('month', CURRENT_DATE)
-                   )""",
-                (user_id, user_id)
+                   AND (paid = FALSE OR paid IS NULL)""",
+                (user_id,)
             )
             ot_hours = cur.fetchone()[0] or 0
             ot_hours_int = int(ot_hours)
