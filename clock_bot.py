@@ -26,43 +26,7 @@ from dotenv import load_dotenv
 from pathlib import Path
 import time
 import atexit
-import datetime
-import threading
-import telebot
 
-TOKEN = 'YOUR_TOKEN_HERE'
-bot = telebot.TeleBot(TOKEN)
-
-@bot.message_handler(commands=['start'])
-def start_message(message):
-    bot.send_message(message.chat.id, 'Hello!')
-
-@bot.message_handler(commands=['clockin'])
-def clockin_message(message):
-    # 这里是 clockin 命令的处理函数
-    bot.send_message(message.chat.id, 'Clock in successful!')
-    # 您可以添加其他逻辑来处理 clockin 命令
-
-def main():
-    bot.polling()
-
-if __name__ == "__main__":
-    main()import sqlite3
-    
-    def init_db():
-        conn = sqlite3.connect("clock_bot.db", check_same_thread=True)
-        c = conn.cursor()
-        c.execute("""CREATE TABLE IF NOT EXISTS clock (
-                    id INTEGER PRIMARY KEY,
-                    time TEXT
-                )""")
-        conn.commit()
-        conn.close()
-    
-    if __name__ == "__main__":
-        init_db()import os
-        
-        TOKEN = os.getenv('TOKEN')
 # === 初始化设置 ===
 app = Flask(__name__)
 
