@@ -104,6 +104,22 @@ def init_database():
         )
         """)
         logger.info("创建 monthly_reports 表成功")
+
+        # 4. Claims表（如果还没有的话）
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS claims (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES drivers(user_id),
+            type TEXT NOT NULL,
+            amount FLOAT NOT NULL,
+            date DATE NOT NULL,
+            photo_file_id TEXT,
+            status TEXT DEFAULT 'PENDING',
+            paid_date TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        )
+        """)
+        logger.info("创建 claims 表成功")
         
         # 确保 location_address 列存在
         cur.execute("""
@@ -122,7 +138,8 @@ def init_database():
         # 创建索引
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
-        CREATE INDEX IF NOT EXISTS idx_monthly_reports_user_date ON monthly_reports(user_id, report_date);
+        CREATE INDEX IF NOT EXISTS idx_monthly_reports_user_year_month ON monthly_reports(user_id, year, month);
+        CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
         """)
         logger.info("创建索引成功")
         
