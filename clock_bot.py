@@ -621,77 +621,92 @@ def init_bot():
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("previousreport", previousreport_start)],
         states={
-            PREVIOUSREPORT_SELECT_WORKER: [MessageHandler(Filters.text & ~Filters.command, previousreport_select_worker)],
-            PREVIOUSREPORT_SELECT_MONTH: [MessageHandler(Filters.text & ~Filters.command, previousreport_select_month)],
+            PREVIOUSREPORT_SELECT_WORKER: [MessageHandler(Filters.text, previousreport_select_worker)],
+            PREVIOUSREPORT_SELECT_MONTH: [MessageHandler(Filters.text, previousreport_select_month)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
     # 2. 查看状态对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("checkstate", checkstate_start)],
         states={
-            CHECKSTATE_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, checkstate_select_user)],
+            CHECKSTATE_SELECT_USER: [MessageHandler(Filters.text, checkstate_select_user)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
-    # 2. 查看报销记录对话处理器
+    # 3. 查看报销记录对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("viewclaims", viewclaims_start)],
         states={
-            VIEWCLAIMS_SELECT_USER: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_user)],
-            VIEWCLAIMS_SELECT_MONTH: [MessageHandler(Filters.text & ~Filters.command, viewclaims_select_month)],
+            VIEWCLAIMS_SELECT_USER: [MessageHandler(Filters.text, viewclaims_select_user)],
+            VIEWCLAIMS_SELECT_MONTH: [MessageHandler(Filters.text, viewclaims_select_month)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
-    # 3. 报销对话处理器
+    # 4. 报销对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("claim", claim_start)],
         states={
-            CLAIM_TYPE: [MessageHandler(Filters.text & ~Filters.command, claim_type)],
-            CLAIM_OTHER_TYPE: [MessageHandler(Filters.text & ~Filters.command, claim_other_type)],
-            CLAIM_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, claim_amount)],
+            CLAIM_TYPE: [MessageHandler(Filters.text, claim_type)],
+            CLAIM_OTHER_TYPE: [MessageHandler(Filters.text, claim_other_type)],
+            CLAIM_AMOUNT: [MessageHandler(Filters.text, claim_amount)],
             CLAIM_PROOF: [MessageHandler(Filters.photo, claim_proof)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
-    # 4. 设置工资对话处理器
+    # 5. 设置工资对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("salary", salary_start)],
         states={
-            SALARY_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, salary_select_driver)],
-            SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text & ~Filters.command, salary_enter_amount)],
-            SALARY_CONFIRM: [MessageHandler(Filters.text & ~Filters.command, salary_confirm)],
+            SALARY_SELECT_DRIVER: [MessageHandler(Filters.text, salary_select_driver)],
+            SALARY_ENTER_AMOUNT: [MessageHandler(Filters.text, salary_enter_amount)],
+            SALARY_CONFIRM: [MessageHandler(Filters.text, salary_confirm)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
-    # 5. 工资发放对话处理器
+    # 6. 工资发放对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("paid", paid_start)],
         states={
-            PAID_SELECT_DRIVER: [MessageHandler(Filters.text & ~Filters.command, paid_select_driver)],
-            PAID_CONFIRM: [MessageHandler(Filters.text & ~Filters.command, paid_confirm)],
+            PAID_SELECT_DRIVER: [MessageHandler(Filters.text, paid_select_driver)],
+            PAID_CONFIRM: [MessageHandler(Filters.text, paid_confirm)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
-    # 6. 打卡对话处理器
+    # 7. 打卡对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("clockin", clockin)],
         states={
             "WAITING_LOCATION": [MessageHandler(Filters.location, handle_location)]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+        per_chat=True,
+        per_user=True
     ))
     
     # PDF 生成命令和回调
