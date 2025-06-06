@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from telegram import (
     Bot, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton
 )
@@ -1159,12 +1159,9 @@ def paid_select_driver(update, context):
         # 获取本月的第一天和最后一天
         today = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
         first_day = today.replace(day=1)
-        # 计算下个月的第一天，然后减去一天得到本月最后一天
-        if today.month == 12:
-            next_month = today.replace(year=today.year + 1, month=1, day=1)
-        else:
-            next_month = today.replace(month=today.month + 1, day=1)
-        last_day = next_month - datetime.timedelta(days=1)
+        # 计算下个月第一天，然后回退一天得到本月最后一天
+        next_month = today.replace(day=1) + datetime.timedelta(days=32)
+        last_day = next_month.replace(day=1) - datetime.timedelta(days=1)
         
         logger.info(f"Period: {first_day} to {last_day}")
         
@@ -1463,9 +1460,17 @@ def pdf_button_callback(update, context):
     try:
         # 获取本月的第一天和最后一天
         today = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
+        logger.info(f"PDF生成 - today: {today}, type: {type(today)}")
+        
         first_day = today.replace(day=1)
-        next_month = today.replace(day=28) + datetime.timedelta(days=4)
-        last_day = (next_month - datetime.timedelta(days=next_month.day)).date()
+        logger.info(f"PDF生成 - first_day: {first_day}, type: {type(first_day)}")
+        
+        # 计算下个月第一天，然后回退一天得到本月最后一天
+        next_month = today.replace(day=1) + datetime.timedelta(days=32)
+        logger.info(f"PDF生成 - next_month: {next_month}, type: {type(next_month)}")
+        
+        last_day = next_month.replace(day=1) - datetime.timedelta(days=1)
+        logger.info(f"PDF生成 - last_day: {last_day}, type: {type(last_day)}")
         
         conn = get_db_connection()
         try:
@@ -1664,12 +1669,14 @@ def pdf_button_callback(update, context):
                             (user_id, first_day, last_day)
                         )
                         logs = cur.fetchall()
+                        logger.info(f"PDF生成 - 获取到 {len(logs)} 条打卡记录")
                         
                         if logs:
                             log_data = [["日期", "上班时间", "下班时间", "休息日", "工作时长"]]
                             
                             for log in logs:
                                 date, clock_in, clock_out, is_off = log
+                                logger.info(f"PDF生成 - 处理记录: date={date}, type={type(date)}")
                                 
                                 # 计算工作时长
                                 hours = 0
@@ -1679,11 +1686,21 @@ def pdf_button_callback(update, context):
                                             in_time = datetime.datetime.strptime(clock_in, "%Y-%m-%d %H:%M:%S")
                                             out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
                                             hours = (out_time - in_time).total_seconds() / 3600
-                                    except (ValueError, TypeError):
-                                        pass
+                                    except (ValueError, TypeError) as e:
+                                        logger.error(f"PDF生成 - 时间解析错误: {e}")
+                                
+                                # 安全处理日期格式化
+                                try:
+                                    if hasattr(date, "strftime"):
+                                        date_str = date.strftime("%Y-%m-%d")
+                                    else:
+                                        date_str = str(date)
+                                except Exception as e:
+                                    logger.error(f"PDF生成 - 日期格式化错误: {e}")
+                                    date_str = str(date)
                                 
                                 log_data.append([
-                                    date.strftime("%Y-%m-%d"),
+                                    date_str,
                                     "休息日" if is_off else (clock_in if clock_in else "未打卡"),
                                     "休息日" if is_off else (clock_out if clock_out else "未打卡"),
                                     "是" if is_off else "否",
@@ -1727,6 +1744,7 @@ def pdf_button_callback(update, context):
             
     except Exception as e:
         logger.error(f"Error generating PDF: {str(e)}")
+        logger.error(f"Error details: {traceback.format_exc()}")
         query.edit_message_text("❌ 生成报告时出错。请稍后再试或联系管理员。")
 
 def viewclaims_start(update, context):
