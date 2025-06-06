@@ -1548,7 +1548,7 @@ def pdf_button_callback(update, context):
                             f"{work_days}"
                         ])
                     
-                    # 创建表格
+                    # Create table
                     table = Table(data)
                     table.setStyle(TableStyle([
                         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
@@ -1562,11 +1562,11 @@ def pdf_button_callback(update, context):
                     elements.append(table)
             
             elif report_type == "salary":
-                title = "薪资报告"
+                title = "Salary Report"
                 elements.append(Paragraph(title, title_style))
                 elements.append(Spacer(1, 20))
                 
-                # 获取所有工人的薪资数据
+                                    # Get salary data for all workers
                 with conn.cursor() as cur:
                     cur.execute(
                         """SELECT d.user_id, d.first_name, d.monthly_salary, d.balance
@@ -1575,13 +1575,13 @@ def pdf_button_callback(update, context):
                     )
                     workers = cur.fetchall()
                     
-                    # 为每个工人获取本月的薪资信息
-                    data = [["工人姓名", "月薪 (RM)", "当前余额 (RM)", "本月报销 (RM)"]]
+                    # Get monthly salary info for each worker
+                    data = [["Worker Name", "Monthly Salary (RM)", "Current Balance (RM)", "This Month Claims (RM)"]]
                     
                     for worker in workers:
                         user_id, name, monthly_salary, balance = worker
                         
-                        # 获取本月报销金额
+                        # Get monthly claims amount
                         cur.execute(
                             """SELECT COALESCE(SUM(amount), 0)
                                FROM claims 
@@ -2218,7 +2218,6 @@ def checkstate_select_user(update, context):
             message = [
                 f"📊 Worker Status: {name}\n",
                 f"💰 Monthly Salary: RM {monthly_salary:.2f}",
-                f"⏰ Total Work Hours (All time): {format_duration(total_hours)}",
                 f"⏰ This Month Unpaid Hours: {format_duration(month_hours)}",
                 f"🕒 This Month Unpaid OT: {ot_hours_int}h {ot_minutes}m",
                 f"📅 This Month Work Days: {work_days} days",
