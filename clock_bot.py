@@ -68,6 +68,10 @@ PAID_SELECT_DRIVER = 0
 PAID_CONFIRM = 1
 VIEWCLAIMS_SELECT_USER = 10
 CHECKSTATE_SELECT_USER = 11
+# 添加新的状态常量
+PREVIOUSREPORT_SELECT_WORKER = 20
+PREVIOUSREPORT_SELECT_YEAR = 21
+PREVIOUSREPORT_SELECT_MONTH = 22
 
 # === 数据库连接池 ===
 db_pool = None
@@ -555,7 +559,19 @@ def init_bot():
     
     # 注册对话处理器（按照优先级顺序排列）
     
-    # 1. 查看状态对话处理器
+    # 1. 历史报告对话处理器
+    dispatcher.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("previousreport", previousreport_start)],
+        states={
+            PREVIOUSREPORT_SELECT_WORKER: [MessageHandler(Filters.text & ~Filters.command, previousreport_select_worker)],
+            PREVIOUSREPORT_SELECT_YEAR: [MessageHandler(Filters.text & ~Filters.command, previousreport_select_year)],
+            PREVIOUSREPORT_SELECT_MONTH: [MessageHandler(Filters.text & ~Filters.command, previousreport_select_month)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True
+    ))
+    
+    # 2. 查看状态对话处理器
     dispatcher.add_handler(ConversationHandler(
         entry_points=[CommandHandler("checkstate", checkstate_start)],
         states={
@@ -666,7 +682,8 @@ def start(update, context):
                     "🧾 /PDF\n"
                     "📷 /viewclaims\n"
                     "💰 /salary\n"
-                    "🟢 /paid"
+                    "🟢 /paid\n"
+                    "📈 /previousreport"
                 )
             else:
                 welcome_msg = (
@@ -2088,3 +2105,170 @@ def ot(update, context):
         update.message.reply_text("❌ An error occurred. Please try again.")
     finally:
         release_db_connection(conn) 
+
+def previousreport_start(update, context):
+    """处理 /previousreport 命令"""
+    user = update.effective_user
+    if user.id not in ADMIN_IDS:
+        update.message.reply_text("❌ Sorry, this command is only available for administrators.")
+        return ConversationHandler.END
+    
+    return show_workers_page(update, context, page=1, command="previousreport")
+
+def previousreport_select_worker(update, context):
+    """处理选择工人的回调"""
+    text = update.message.text
+    
+    if text == "⬅️ Previous" or text == "Next ➡️" or text == "🔄 Refresh":
+        return handle_page_navigation(update, context)
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 获取工人信息
+            cur.execute(
+                """SELECT user_id, first_name, username 
+                   FROM drivers 
+                   WHERE first_name = %s OR username = %s""",
+                (text, text)
+            )
+            worker = cur.fetchone()
+            
+            if not worker:
+                update.message.reply_text("❌ Worker not found. Please try again.")
+                return PREVIOUSREPORT_SELECT_WORKER
+            
+            # 保存选中的工人信息到上下文
+            context.user_data['selected_worker'] = {
+                'user_id': worker[0],
+                'first_name': worker[1],
+                'username': worker[2]
+            }
+            
+            # 创建年份选择键盘
+            current_year = datetime.datetime.now().year
+            years = [str(year) for year in range(current_year - 2, current_year + 1)]
+            keyboard = [[year] for year in years]
+            keyboard.append(["❌ Cancel"])
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            
+            update.message.reply_text(
+                f"Please select the year for {worker[1]}'s report:",
+                reply_markup=reply_markup
+            )
+            return PREVIOUSREPORT_SELECT_YEAR
+            
+    except Exception as e:
+        logger.error(f"Error in previousreport_select_worker: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact support.")
+        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
+
+def previousreport_select_year(update, context):
+    """处理选择年份的回调"""
+    text = update.message.text
+    
+    if text == "❌ Cancel":
+        return cancel(update, context)
+    
+    try:
+        year = int(text)
+        context.user_data['selected_year'] = year
+        
+        # 创建月份选择键盘
+        months = [
+            ["January", "February", "March"],
+            ["April", "May", "June"],
+            ["July", "August", "September"],
+            ["October", "November", "December"],
+            ["❌ Cancel"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(months, resize_keyboard=True)
+        
+        worker = context.user_data['selected_worker']
+        update.message.reply_text(
+            f"Please select the month for {worker['first_name']}'s {year} report:",
+            reply_markup=reply_markup
+        )
+        return PREVIOUSREPORT_SELECT_MONTH
+        
+    except ValueError:
+        update.message.reply_text("❌ Invalid year. Please select a year from the keyboard.")
+        return PREVIOUSREPORT_SELECT_YEAR
+
+def previousreport_select_month(update, context):
+    """处理选择月份的回调并生成报告"""
+    text = update.message.text
+    
+    if text == "❌ Cancel":
+        return cancel(update, context)
+    
+    # 月份名称到数字的映射
+    month_mapping = {
+        "January": 1, "February": 2, "March": 3,
+        "April": 4, "May": 5, "June": 6,
+        "July": 7, "August": 8, "September": 9,
+        "October": 10, "November": 11, "December": 12
+    }
+    
+    if text not in month_mapping:
+        update.message.reply_text("❌ Invalid month. Please select a month from the keyboard.")
+        return PREVIOUSREPORT_SELECT_MONTH
+    
+    month = month_mapping[text]
+    year = context.user_data['selected_year']
+    worker = context.user_data['selected_worker']
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 获取该月的工资信息
+            cur.execute(
+                """SELECT monthly_salary 
+                   FROM drivers 
+                   WHERE user_id = %s""",
+                (worker['user_id'],)
+            )
+            salary_result = cur.fetchone()
+            monthly_salary = salary_result[0] if salary_result else 0
+            
+            # 获取该月的报销信息
+            cur.execute(
+                """SELECT claim_type, amount, status, created_at 
+                   FROM claims 
+                   WHERE user_id = %s 
+                   AND EXTRACT(YEAR FROM created_at) = %s 
+                   AND EXTRACT(MONTH FROM created_at) = %s
+                   ORDER BY created_at""",
+                (worker['user_id'], year, month)
+            )
+            claims = cur.fetchall()
+            
+            # 生成报告消息
+            report = f"📊 Report for {worker['first_name']} - {text} {year}\n\n"
+            report += f"💰 Monthly Salary: RM {monthly_salary:.2f}\n\n"
+            
+            if claims:
+                report += "📝 Claims:\n"
+                total_claims = 0
+                for claim in claims:
+                    claim_type, amount, status, created_at = claim
+                    report += f"- {claim_type}: RM {amount:.2f} ({status}) - {created_at.strftime('%d/%m/%Y')}\n"
+                    if status == 'APPROVED':
+                        total_claims += amount
+                report += f"\n💵 Total Approved Claims: RM {total_claims:.2f}"
+            else:
+                report += "📝 No claims found for this month."
+            
+            # 发送报告
+            reply_markup = ReplyKeyboardRemove()
+            update.message.reply_text(report, reply_markup=reply_markup)
+            return ConversationHandler.END
+            
+    except Exception as e:
+        logger.error(f"Error in previousreport_select_month: {str(e)}")
+        update.message.reply_text("❌ An error occurred. Please try again or contact support.")
+        return ConversationHandler.END
+    finally:
+        release_db_connection(conn)
