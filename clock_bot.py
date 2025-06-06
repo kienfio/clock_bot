@@ -1423,28 +1423,28 @@ def paid_confirm(update, context):
     return ConversationHandler.END
 
 def pdf_start(update, context):
-    """开始生成PDF报告流程"""
+    """Start PDF report generation process"""
     user = update.effective_user
     if user.id not in ADMIN_IDS:
         update.message.reply_text("❌ This command is only available for admins.")
         return ConversationHandler.END
     
-    # 创建内联键盘，提供不同类型的报告选项
+    # Create inline keyboard with report options
     keyboard = [
-        [InlineKeyboardButton("📊 工作时间报告", callback_data="pdf_work_hours")],
-        [InlineKeyboardButton("💰 薪资报告", callback_data="pdf_salary")],
-        [InlineKeyboardButton("🧾 全部数据报告", callback_data="pdf_all")]
+        [InlineKeyboardButton("📊 Work Hours Report", callback_data="pdf_work_hours")],
+        [InlineKeyboardButton("💰 Salary Report", callback_data="pdf_salary")],
+        [InlineKeyboardButton("🧾 Complete Data Report", callback_data="pdf_all")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     update.message.reply_text(
-        "请选择要生成的报告类型:",
+        "Please select the type of report to generate:",
         reply_markup=reply_markup
     )
     return ConversationHandler.END
 
 def pdf_button_callback(update, context):
-    """处理PDF报告选择按钮回调"""
+    """Handle PDF report button selection callback"""
     query = update.callback_query
     query.answer()
     
@@ -1452,29 +1452,29 @@ def pdf_button_callback(update, context):
     user = query.from_user
     
     if user.id not in ADMIN_IDS:
-        query.edit_message_text("❌ 只有管理员才能生成报告。")
+        query.edit_message_text("❌ Only administrators can generate reports.")
         return
     
-    query.edit_message_text("🔄 正在生成报告，请稍候...")
+    query.edit_message_text("🔄 Generating report, please wait...")
     
     try:
-        # 获取本月的第一天和最后一天
+        # Get first and last day of current month
         today = datetime.datetime.now(pytz.timezone('Asia/Kuala_Lumpur')).date()
-        logger.info(f"PDF生成 - today: {today}, type: {type(today)}")
+        logger.info(f"PDF generation - today: {today}, type: {type(today)}")
         
         first_day = today.replace(day=1)
-        logger.info(f"PDF生成 - first_day: {first_day}, type: {type(first_day)}")
+        logger.info(f"PDF generation - first_day: {first_day}, type: {type(first_day)}")
         
-        # 计算下个月第一天，然后回退一天得到本月最后一天
+        # Calculate next month's first day, then go back one day to get current month's last day
         next_month = today.replace(day=1) + datetime.timedelta(days=32)
-        logger.info(f"PDF生成 - next_month: {next_month}, type: {type(next_month)}")
+        logger.info(f"PDF generation - next_month: {next_month}, type: {type(next_month)}")
         
         last_day = next_month.replace(day=1) - datetime.timedelta(days=1)
-        logger.info(f"PDF生成 - last_day: {last_day}, type: {type(last_day)}")
+        logger.info(f"PDF generation - last_day: {last_day}, type: {type(last_day)}")
         
         conn = get_db_connection()
         try:
-            # 生成PDF文件
+            # Generate PDF file
             pdf_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
             pdf_path = pdf_file.name
             pdf_file.close()
@@ -1482,16 +1482,16 @@ def pdf_button_callback(update, context):
             doc = SimpleDocTemplate(pdf_path, pagesize=A4)
             elements = []
             
-            # 添加标题
+            # Add title
             styles = getSampleStyleSheet()
             title_style = styles["Title"]
             
             if report_type == "work_hours":
-                title = "工作时间报告"
+                title = "Work Hours Report"
                 elements.append(Paragraph(title, title_style))
                 elements.append(Spacer(1, 20))
                 
-                # 获取所有工人的工作时间数据
+                # Get work hour data for all workers
                 with conn.cursor() as cur:
                     cur.execute(
                         """SELECT d.user_id, d.first_name, d.total_hours
@@ -1500,13 +1500,13 @@ def pdf_button_callback(update, context):
                     )
                     workers = cur.fetchall()
                     
-                    # 为每个工人获取本月的工作时间
-                    data = [["工人姓名", "总工作时间", "本月工作时间", "本月工作天数"]]
+                    # Get monthly work hours for each worker
+                    data = [["Worker Name", "Total Work Hours", "This Month Hours", "Work Days"]]
                     
                     for worker in workers:
                         user_id, name, total_hours = worker
                         
-                        # 获取本月工作天数
+                        # Get work days this month
                         cur.execute(
                             """SELECT COUNT(DISTINCT date) 
                                FROM clock_logs 
@@ -1517,7 +1517,7 @@ def pdf_button_callback(update, context):
                         )
                         work_days = cur.fetchone()[0] or 0
                         
-                        # 计算本月工作时间
+                        # Calculate work hours this month
                         month_hours = 0
                         cur.execute(
                             """SELECT date, clock_in, clock_out, is_off
@@ -1598,7 +1598,7 @@ def pdf_button_callback(update, context):
                             f"{claims_amount:.2f}"
                         ])
                     
-                    # 创建表格
+                    # Create table
                     table = Table(data)
                     table.setStyle(TableStyle([
                         ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
@@ -1612,12 +1612,12 @@ def pdf_button_callback(update, context):
                     elements.append(table)
             
             else:  # all
-                title = "全部数据报告"
+                title = "Complete Data Report"
                 elements.append(Paragraph(title, title_style))
                 elements.append(Spacer(1, 20))
                 
-                # 工人基本信息
-                elements.append(Paragraph("工人基本信息", styles["Heading2"]))
+                # Worker basic information
+                elements.append(Paragraph("Worker Information", styles["Heading2"]))
                 elements.append(Spacer(1, 10))
                 
                 with conn.cursor() as cur:
@@ -1628,7 +1628,7 @@ def pdf_button_callback(update, context):
                     )
                     workers = cur.fetchall()
                     
-                    data = [["工人姓名", "月薪 (RM)", "总工作时间", "当前余额 (RM)"]]
+                    data = [["Worker Name", "Monthly Salary (RM)", "Total Work Hours", "Current Balance (RM)"]]
                     for worker in workers:
                         user_id, name, monthly_salary, total_hours, balance = worker
                         data.append([
@@ -1651,13 +1651,13 @@ def pdf_button_callback(update, context):
                     elements.append(table)
                     elements.append(Spacer(1, 20))
                     
-                    # 本月打卡记录
-                    elements.append(Paragraph("本月打卡记录", styles["Heading2"]))
+                    # This month's clock records
+                    elements.append(Paragraph("Clock Records This Month", styles["Heading2"]))
                     elements.append(Spacer(1, 10))
                     
                     for worker in workers:
                         user_id, name, _, _, _ = worker
-                        elements.append(Paragraph(f"工人: {name}", styles["Heading3"]))
+                        elements.append(Paragraph(f"Worker: {name}", styles["Heading3"]))
                         elements.append(Spacer(1, 5))
                         
                         cur.execute(
@@ -1669,16 +1669,16 @@ def pdf_button_callback(update, context):
                             (user_id, first_day, last_day)
                         )
                         logs = cur.fetchall()
-                        logger.info(f"PDF生成 - 获取到 {len(logs)} 条打卡记录")
+                        logger.info(f"PDF generation - Retrieved {len(logs)} clock records")
                         
                         if logs:
-                            log_data = [["日期", "上班时间", "下班时间", "休息日", "工作时长"]]
+                            log_data = [["Date", "Clock In", "Clock Out", "Off Day", "Work Hours"]]
                             
                             for log in logs:
                                 date, clock_in, clock_out, is_off = log
-                                logger.info(f"PDF生成 - 处理记录: date={date}, type={type(date)}")
+                                logger.info(f"PDF generation - Processing record: date={date}, type={type(date)}")
                                 
-                                # 计算工作时长
+                                # Calculate work hours
                                 hours = 0
                                 if not is_off and clock_in and clock_out and clock_in != 'OFF' and clock_out != 'OFF':
                                     try:
@@ -1687,23 +1687,23 @@ def pdf_button_callback(update, context):
                                             out_time = datetime.datetime.strptime(clock_out, "%Y-%m-%d %H:%M:%S")
                                             hours = (out_time - in_time).total_seconds() / 3600
                                     except (ValueError, TypeError) as e:
-                                        logger.error(f"PDF生成 - 时间解析错误: {e}")
+                                        logger.error(f"PDF generation - Time parsing error: {e}")
                                 
-                                # 安全处理日期格式化
+                                # Safe date formatting
                                 try:
                                     if hasattr(date, "strftime"):
                                         date_str = date.strftime("%Y-%m-%d")
                                     else:
                                         date_str = str(date)
                                 except Exception as e:
-                                    logger.error(f"PDF生成 - 日期格式化错误: {e}")
+                                    logger.error(f"PDF generation - Date formatting error: {e}")
                                     date_str = str(date)
                                 
                                 log_data.append([
                                     date_str,
-                                    "休息日" if is_off else (clock_in if clock_in else "未打卡"),
-                                    "休息日" if is_off else (clock_out if clock_out else "未打卡"),
-                                    "是" if is_off else "否",
+                                    "Off Day" if is_off else (clock_in if clock_in else "Not Clocked"),
+                                    "Off Day" if is_off else (clock_out if clock_out else "Not Clocked"),
+                                    "Yes" if is_off else "No",
                                     format_duration(hours) if hours > 0 else "-"
                                 ])
                             
@@ -1716,28 +1716,28 @@ def pdf_button_callback(update, context):
                             ]))
                             elements.append(log_table)
                         else:
-                            elements.append(Paragraph("没有打卡记录", styles["Normal"]))
+                            elements.append(Paragraph("No clock records found", styles["Normal"]))
                         
                         elements.append(Spacer(1, 15))
             
-            # 构建PDF
+            # Build PDF
             doc.build(elements)
             
-            # 发送PDF文件
+            # Send PDF file
             with open(pdf_path, 'rb') as f:
                 current_date = datetime.datetime.now().strftime("%Y%m%d")
                 bot.send_document(
                     chat_id=user.id,
                     document=f,
                     filename=f"{report_type}_report_{current_date}.pdf",
-                    caption=f"📊 {title} - 生成于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
+                    caption=f"📊 {title} - Generated on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
                 )
             
-            # 删除临时文件
+            # Delete temporary file
             os.unlink(pdf_path)
             
-            # 更新消息
-            query.edit_message_text(f"✅ {title}已生成并发送！")
+            # Update message
+            query.edit_message_text(f"✅ {title} has been generated and sent!")
             
         finally:
             release_db_connection(conn)
@@ -1745,10 +1745,10 @@ def pdf_button_callback(update, context):
     except Exception as e:
         logger.error(f"Error generating PDF: {str(e)}")
         logger.error(f"Error details: {traceback.format_exc()}")
-        query.edit_message_text("❌ 生成报告时出错。请稍后再试或联系管理员。")
+        query.edit_message_text("❌ Error generating report. Please try again later or contact admin.")
 
 def viewclaims_start(update, context):
-    """开始查看报销记录流程"""
+    """Start the view claims process"""
     user = update.effective_user
     if user.id not in ADMIN_IDS:
         update.message.reply_text("❌ This command is only available for admins.")
@@ -1757,7 +1757,7 @@ def viewclaims_start(update, context):
     return show_workers_page(update, context, page=1, command="viewclaims")
 
 def show_workers_page(update, context, page=1, command=""):
-    """显示工人列表的分页"""
+    """Display paginated worker list"""
     items_per_page = 5
     offset = (page - 1) * items_per_page
     
