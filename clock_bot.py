@@ -1881,7 +1881,7 @@ def viewclaims_select_month(update, context):
         with conn.cursor() as cur:
             # 构建查询
             query = """
-                SELECT c.claim_type, c.amount, c.status, c.created_at, c.proof_file_id
+                SELECT c.type, c.amount, c.status, c.created_at, c.photo_file_id
                 FROM claims c
                 WHERE c.user_id = %s AND EXTRACT(YEAR FROM c.created_at) = %s
             """
@@ -1914,13 +1914,13 @@ def viewclaims_select_month(update, context):
             total_rejected = 0
             
             for claim in claims:
-                claim_type, amount, status, created_at, proof_file_id = claim
+                claim_type, amount, status, created_at, photo_file_id = claim
                 report += f"📅 {created_at.strftime('%d/%m/%Y')}\n"
                 report += f"📝 Type: {claim_type}\n"
                 report += f"💰 Amount: RM {amount:.2f}\n"
                 report += f"📊 Status: {status}\n"
-                if proof_file_id:
-                    report += f"📎 Has Proof: Yes\n"
+                if photo_file_id:
+                    report += f"📎 Has Photo: Yes\n"
                 report += "\n"
                 
                 total_amount += amount
