@@ -83,77 +83,29 @@ def init_database():
             clock_out VARCHAR(30),
             is_off BOOLEAN DEFAULT FALSE,
             location_address TEXT,
-            paid BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, date)
         )
         """)
         logger.info("创建 clock_logs 表成功")
 
-        # 确保 clock_logs 表中的 paid 列存在
+        # 3. 月度报告表
         cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 
-                FROM information_schema.columns 
-                WHERE table_name='clock_logs' AND column_name='paid'
-            ) THEN
-                ALTER TABLE clock_logs ADD COLUMN paid BOOLEAN DEFAULT FALSE;
-            END IF;
-        END $$;
-        """)
-
-        # 添加 OT 记录表
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS ot_logs (
+        CREATE TABLE IF NOT EXISTS monthly_reports (
             id SERIAL PRIMARY KEY,
             user_id BIGINT REFERENCES drivers(user_id),
-            date DATE NOT NULL,
-            start_time TIMESTAMP WITH TIME ZONE,
-            end_time TIMESTAMP WITH TIME ZONE,
-            duration FLOAT DEFAULT 0.0,
-            paid BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        )
-        """)
-        logger.info("创建 ot_logs 表成功")
-
-        # 确保 ot_logs 表中的 paid 列存在
-        cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 
-                FROM information_schema.columns 
-                WHERE table_name='ot_logs' AND column_name='paid'
-            ) THEN
-                ALTER TABLE ot_logs ADD COLUMN paid BOOLEAN DEFAULT FALSE;
-            END IF;
-        END $$;
-        """)
-
-        # 添加工资发放记录表
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS salary_payments (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT REFERENCES drivers(user_id),
-            payment_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            salary_amount FLOAT NOT NULL,
-            claims_amount FLOAT DEFAULT 0.0,
-            total_amount FLOAT NOT NULL,
+            report_date DATE NOT NULL,
+            total_claims FLOAT DEFAULT 0.0,
+            total_ot_hours FLOAT DEFAULT 0.0,
+            total_salary FLOAT DEFAULT 0.0,
             work_days INTEGER DEFAULT 0,
-            off_days INTEGER DEFAULT 0,
-            work_hours FLOAT DEFAULT 0.0,
-            ot_hours FLOAT DEFAULT 0.0,
-            period_start DATE NOT NULL,
-            period_end DATE NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, report_date)
         )
         """)
-        logger.info("创建 salary_payments 表成功")
+        logger.info("创建 monthly_reports 表成功")
 
-        # 添加报销记录表
+        # 4. Claims表（如果还没有的话）
         cur.execute("""
         CREATE TABLE IF NOT EXISTS claims (
             id SERIAL PRIMARY KEY,
@@ -168,28 +120,6 @@ def init_database():
         )
         """)
         logger.info("创建 claims 表成功")
-        
-        # 确保 claims 表中的 status 和 paid_date 列存在
-        cur.execute("""
-        DO $$
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 
-                FROM information_schema.columns 
-                WHERE table_name='claims' AND column_name='status'
-            ) THEN
-                ALTER TABLE claims ADD COLUMN status TEXT DEFAULT 'PENDING';
-            END IF;
-            
-            IF NOT EXISTS (
-                SELECT 1 
-                FROM information_schema.columns 
-                WHERE table_name='claims' AND column_name='paid_date'
-            ) THEN
-                ALTER TABLE claims ADD COLUMN paid_date TIMESTAMP WITH TIME ZONE;
-            END IF;
-        END $$;
-        """)
         
         # 确保 location_address 列存在
         cur.execute("""
@@ -208,6 +138,7 @@ def init_database():
         # 创建索引
         cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_clock_logs_user_date ON clock_logs(user_id, date);
+        CREATE INDEX IF NOT EXISTS idx_monthly_reports_user_date ON monthly_reports(user_id, report_date);
         CREATE INDEX IF NOT EXISTS idx_claims_user_date ON claims(user_id, date);
         """)
         logger.info("创建索引成功")
