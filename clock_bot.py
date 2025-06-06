@@ -548,6 +548,34 @@ def fix_claims_data():
     finally:
         release_db_connection(conn)
 
+def ensure_user_exists(update, context):
+    """确保用户存在于数据库中"""
+    user = update.effective_user
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # 检查用户是否存在
+            cur.execute("SELECT * FROM drivers WHERE user_id = %s", (user.id,))
+            driver = cur.fetchone()
+            
+            if not driver:
+                # 创建新用户
+                cur.execute(
+                    """INSERT INTO drivers (user_id, username, first_name, monthly_salary) 
+                       VALUES (%s, %s, %s, 3500.0)""",
+                    (user.id, user.username, user.first_name)
+                )
+                conn.commit()
+                logger.info(f"Created new user: {user.id} ({user.first_name})")
+                update.message.reply_text("✅ Your user account has been created in the system.")
+            else:
+                update.message.reply_text("✅ Your user account already exists in the system.")
+    except Exception as e:
+        logger.error(f"Error in ensure_user_exists: {str(e)}")
+        update.message.reply_text("❌ An error occurred while checking your user account.")
+    finally:
+        release_db_connection(conn)
+
 def init_bot():
     """初始化 Telegram Bot 和 Dispatcher"""
     global dispatcher
@@ -558,6 +586,7 @@ def init_bot():
     
     # 注册命令处理器
     dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("checkuser", ensure_user_exists))  # 添加临时命令
     
     # 注册对话处理器（按照优先级顺序排列）
     
@@ -1703,6 +1732,8 @@ def show_workers_page(update, context, page=1, command=""):
                 return CHECKSTATE_SELECT_USER
             elif command == "paid":
                 return PAID_SELECT_DRIVER
+            elif command == "previousreport":
+                return PREVIOUSREPORT_SELECT_WORKER
             return ConversationHandler.END
             
     except Exception as e:
@@ -1734,39 +1765,45 @@ def viewclaims_select_user(update, context):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # 获取工人信息
-            cur.execute(
-                """SELECT user_id, first_name, username 
-                   FROM drivers 
-                   WHERE first_name = %s OR username = %s""",
-                (text, text)
-            )
-            worker = cur.fetchone()
-            
-            if not worker:
-                update.message.reply_text("❌ Worker not found. Please try again.")
+            # 从输入文本中提取用户ID
+            try:
+                user_id = int(text.split(' - ')[0])
+                cur.execute(
+                    """SELECT user_id, first_name, username 
+                       FROM drivers 
+                       WHERE user_id = %s""",
+                    (user_id,)
+                )
+                worker = cur.fetchone()
+                
+                if not worker:
+                    update.message.reply_text("❌ Worker not found. Please try again.")
+                    return VIEWCLAIMS_SELECT_USER
+                
+                # 保存选中的工人信息到上下文
+                context.user_data['selected_worker'] = {
+                    'user_id': worker[0],
+                    'first_name': worker[1],
+                    'username': worker[2]
+                }
+                
+                # 创建年份选择键盘
+                current_year = datetime.datetime.now().year
+                years = [str(year) for year in range(current_year - 2, current_year + 1)]
+                keyboard = [[year] for year in years]
+                keyboard.append(["👁 View All Claims"])  # 添加查看所有记录的选项
+                keyboard.append(["❌ Cancel"])
+                reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                
+                update.message.reply_text(
+                    f"Please select the year for {worker[1]}'s claims, or choose 'View All Claims' to see all records:",
+                    reply_markup=reply_markup
+                )
+                return VIEWCLAIMS_SELECT_YEAR
+                
+            except (ValueError, IndexError):
+                update.message.reply_text("❌ Invalid selection. Please select a worker from the list.")
                 return VIEWCLAIMS_SELECT_USER
-            
-            # 保存选中的工人信息到上下文
-            context.user_data['selected_worker'] = {
-                'user_id': worker[0],
-                'first_name': worker[1],
-                'username': worker[2]
-            }
-            
-            # 创建年份选择键盘
-            current_year = datetime.datetime.now().year
-            years = [str(year) for year in range(current_year - 2, current_year + 1)]
-            keyboard = [[year] for year in years]
-            keyboard.append(["👁 View All Claims"])  # 添加查看所有记录的选项
-            keyboard.append(["❌ Cancel"])
-            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            
-            update.message.reply_text(
-                f"Please select the year for {worker[1]}'s claims, or choose 'View All Claims' to see all records:",
-                reply_markup=reply_markup
-            )
-            return VIEWCLAIMS_SELECT_YEAR
             
     except Exception as e:
         logger.error(f"Error in viewclaims_select_user: {str(e)}")
@@ -2269,38 +2306,44 @@ def previousreport_select_worker(update, context):
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
-            # 获取工人信息
-            cur.execute(
-                """SELECT user_id, first_name, username 
-                   FROM drivers 
-                   WHERE first_name = %s OR username = %s""",
-                (text, text)
-            )
-            worker = cur.fetchone()
-            
-            if not worker:
-                update.message.reply_text("❌ Worker not found. Please try again.")
+            # 从输入文本中提取用户ID
+            try:
+                user_id = int(text.split(' - ')[0])
+                cur.execute(
+                    """SELECT user_id, first_name, username 
+                       FROM drivers 
+                       WHERE user_id = %s""",
+                    (user_id,)
+                )
+                worker = cur.fetchone()
+                
+                if not worker:
+                    update.message.reply_text("❌ Worker not found. Please try again.")
+                    return PREVIOUSREPORT_SELECT_WORKER
+                
+                # 保存选中的工人信息到上下文
+                context.user_data['selected_worker'] = {
+                    'user_id': worker[0],
+                    'first_name': worker[1],
+                    'username': worker[2]
+                }
+                
+                # 创建年份选择键盘
+                current_year = datetime.datetime.now().year
+                years = [str(year) for year in range(current_year - 2, current_year + 1)]
+                keyboard = [[year] for year in years]
+                keyboard.append(["❌ Cancel"])
+                reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                
+                update.message.reply_text(
+                    f"Please select the year for {worker[1]}'s report:",
+                    reply_markup=reply_markup
+                )
+                return PREVIOUSREPORT_SELECT_YEAR
+                
+            except (ValueError, IndexError):
+                update.message.reply_text("❌ Invalid selection. Please select a worker from the list.")
                 return PREVIOUSREPORT_SELECT_WORKER
-            
-            # 保存选中的工人信息到上下文
-            context.user_data['selected_worker'] = {
-                'user_id': worker[0],
-                'first_name': worker[1],
-                'username': worker[2]
-            }
-            
-            # 创建年份选择键盘
-            current_year = datetime.datetime.now().year
-            years = [str(year) for year in range(current_year - 2, current_year + 1)]
-            keyboard = [[year] for year in years]
-            keyboard.append(["❌ Cancel"])
-            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            
-            update.message.reply_text(
-                f"Please select the year for {worker[1]}'s report:",
-                reply_markup=reply_markup
-            )
-            return PREVIOUSREPORT_SELECT_YEAR
             
     except Exception as e:
         logger.error(f"Error in previousreport_select_worker: {str(e)}")
